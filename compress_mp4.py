@@ -166,6 +166,10 @@ def main():
             skip_count += 1
         else:
             fail_count += 1
+            
+        if not dry_run:
+            total_processed = success_count + skip_count + fail_count
+            print(f"  [PROGRESS] Processed {total_processed}/{len(mp4_files)} files.")
 
     print()
     print("=" * 50)
