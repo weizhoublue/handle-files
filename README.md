@@ -27,17 +27,17 @@ python compress_mp4.py <目录> [dry_run] [confirm]
 | `dry_run` | `true` 只展示将要处理的文件，不执行压缩；`false` 真正执行 | `true` |
 | `confirm` | `true` 每个文件执行前提示 y/n 确认；`false` 无人值守批量处理 | `true` |
 
-### 示例
+### 按照此命令执行
 
 ```bash
 # 预览将要处理的文件（不做任何修改）
-python compress_mp4.py /Volumes/Data/Videos
+python3 compress_mp4.py /Volumes/Data/Videos
 
 # 逐文件确认后压缩（默认开启确认）
-python compress_mp4.py /Volumes/Data/Videos false
+python3 compress_mp4.py /Volumes/Data/Videos false
 
 # 无人值守批量压缩，不逐文件询问
-python compress_mp4.py /Volumes/Data/Videos false false
+python3 compress_mp4.py /Volumes/Data/Videos false false
 ```
 
 ### 压缩参数
@@ -88,14 +88,14 @@ python sync_check.py <源目录> <目标目录> [copy]
 | `目标目录` | 待对比的目标目录 | 必填 |
 | `copy` | `false` 仅报告差异，不做任何修改；`true` 将需要补齐的文件从源复制到目标 | `false` |
 
-### 示例
+### 按照此命令执行
 
 ```bash
 # 仅报告差异（不修改任何文件）
-python sync_check.py /Volumes/red/1 /Volumes/black/1
+python3 sync_check.py /Volumes/red/1 /Volumes/black/1
 
 # 报告差异并执行复制
-python sync_check.py /Volumes/red/1 /Volumes/black/1 true
+python3 sync_check.py /Volumes/red/1 /Volumes/black/1 true
 ```
 
 ### 差异类型说明
@@ -106,19 +106,6 @@ python sync_check.py /Volumes/red/1 /Volumes/black/1 true
 | `[DIFF]` src 更大 | 两边都有，但源文件更大 | 用源文件覆盖目标 |
 | `[DIFF]` dst 更大 | 两边都有，但目标文件更大 | 跳过（目标可能更完整） |
 | `[EXTRA]` | 目标有、源无 | 仅报告，不删除 |
-
-### 日志标签
-
-| 标签 | 含义 |
-|------|------|
-| `[INFO]` | 启动信息、路径、运行模式 |
-| `[SCAN]` | 扫描进度 |
-| `[MISS]` | 源有目标无的文件（显示两边路径） |
-| `[EXTRA]` | 目标有源无的文件（显示两边路径） |
-| `[DIFF]` | 大小不一致的文件（显示两边路径和大小） |
-| `[COPY]` | 正在复制的文件 |
-| `[WARN]` | 无法读写的文件（跳过继续）或大小写冲突警告 |
-| `[SKIP]` | copy=false 时提示有文件需要复制 |
 
 ### 大小写冲突警告
 
@@ -131,21 +118,3 @@ python sync_check.py /Volumes/red/1 /Volumes/black/1 true
 ```
 
 这种情况发生在源卷为大小写敏感（如 exFAT、Linux 格式）而目标卷为大小写不敏感（如 macOS 默认 HFS+/APFS）时，无法将两个文件同时完整复制到目标卷。
-
-### 汇总输出示例
-
-```
-==================================================
-Scan complete
-  Source files      : 30296
-  Destination files : 30296
-
-Differences:
-  Missing  (src only)       : 2
-  Extra    (dst only)       : 0
-  Size diff, src larger     : 1  (will copy)
-  Size diff, dst larger     : 1  (skip)
-  Consistent                : 30293
-
-  Copied              : 3  (2 missing + 1 size diff src larger)
-```
