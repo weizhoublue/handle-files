@@ -61,8 +61,8 @@ def compress_file(input_path: Path, dry_run: bool, confirm: bool) -> bool:
     cmd = [
         "ffmpeg",
         "-i", str(input_path),
-        "-c:v", "libx264",
-        "-crf", "23",
+        "-c:v", "libx265",
+        "-crf", "26",
         "-preset", "slow",
         "-c:a", "aac",
         "-b:a", "192k",
