@@ -32,7 +32,10 @@ if sys.version_info < (3, 7):
 def find_mp4_files(directory: Path) -> list[Path]:
     """Find all MP4 files recursively, skipping already-processed ones."""
     mp4_files = []
-    for file in sorted(directory.rglob("*.mp4")):
+    for file in sorted(
+        path for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".mp4"
+    ):
         stem = file.stem
         if stem.endswith("_output"):
             print(f"  [SKIP] Already processed: {file}")
@@ -61,7 +64,7 @@ def compress_file(input_path: Path, dry_run: bool, confirm: bool) -> bool:
     cmd = [
         "ffmpeg",
         "-i", str(input_path),
-        "-c:v", "libx265",
+        "-c:v", "libx264",
         "-crf", "26",
         "-preset", "slow",
         "-c:a", "aac",
