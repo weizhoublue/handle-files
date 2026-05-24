@@ -18,7 +18,7 @@ brew install ffmpeg
 ### 用法
 
 ```bash
-python compress_mp4.py <目录> [dry_run] [confirm]
+python3 compress_mp4.py <目录> [dry_run] [confirm]
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -79,7 +79,7 @@ ffmpeg -i input.mp4 -c:v libx264 -crf 23 -preset slow -c:a aac -b:a 192k input_o
 ### 用法
 
 ```bash
-python sync_check.py <源目录> <目标目录> [copy]
+python3 sync_check.py <源目录> <目标目录> [copy]
 ```
 
 | 参数 | 说明 | 默认值 |
