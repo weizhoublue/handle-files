@@ -37,14 +37,14 @@ sudo mv compress-vedio  /usr/local/bin/
 ```
 
 ```text
-compress-vedio --source/-s <directory> [--dest/-d <directory>] [--remove <true|false>] [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
+compress-vedio --source/-s <directory> [--dest/-d <directory>] [--remove/-r <true|false>] [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
 ```
 
 | 选项 | 说明 |
 | --- | --- |
 | `--source`, `-s` | 必填，递归扫描的源目录。 |
 | `--dest`, `-d` | 可选，输出根目录；必须已经存在。 |
-| `--remove` | 是否在成功后删除源文件；默认值 `true`。 |
+| `--remove`, `-r` | 是否在成功后删除源文件；默认值 `true`。 |
 | `--execute`, `-x` | 直接压缩所有发现的文件；省略时仅预览，不修改文件。 |
 | `--ff-option`, `-f` | 传给 ffmpeg 的编码选项字符串。默认值为 `-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k`。 |
 | `--help`, `-h` | 显示帮助。 |

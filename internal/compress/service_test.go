@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -304,8 +303,8 @@ func TestRunStreamsChildOutputToLogger(t *testing.T) {
 	logs := out.String()
 	if !strings.Contains(logs, "INFO, compressed input="+source+" ") ||
 		!strings.Contains(logs, "output="+output) ||
-		!strings.Contains(logs, "original_bytes=5") ||
-		!strings.Contains(logs, "output_bytes=10") {
+		!strings.Contains(logs, "original_size=5 B") ||
+		!strings.Contains(logs, "output_size=10 B") {
 		t.Fatalf("compressed log missing size details:\n%s", logs)
 	}
 }
@@ -353,11 +352,10 @@ func TestRunReportsSizeReductionForSuccessfulCompression(t *testing.T) {
 		name           string
 		input          string
 		output         string
-		wantReduction  string
 		wantPercentage string
 	}{
-		{name: "smaller output", input: "original", output: "out", wantReduction: "5", wantPercentage: "62.50"},
-		{name: "empty input", input: "", output: "", wantReduction: "0", wantPercentage: "0.00"},
+		{name: "smaller output", input: "original", output: "out", wantPercentage: "62.50"},
+		{name: "empty input", input: "", output: "", wantPercentage: "0.00"},
 	}
 
 	for _, tt := range tests {
@@ -389,11 +387,43 @@ func TestRunReportsSizeReductionForSuccessfulCompression(t *testing.T) {
 			if want := (Summary{Total: 1, Succeeded: 1}); summary != want {
 				t.Fatalf("Run() summary = %#v, want %#v", summary, want)
 			}
-			wantLog := "INFO, compressed input=" + source + " original_bytes=" + strconv.Itoa(len(tt.input)) +
-				" output=" + output + " output_bytes=" + strconv.Itoa(len(tt.output)) +
-				" reduction_bytes=" + tt.wantReduction + " reduction_percent=" + tt.wantPercentage
+			wantLog := "INFO, compressed input=" + source + " original_size=" +
+				formatSize(int64(len(tt.input))) + " output=" + output + " output_size=" +
+				formatSize(int64(len(tt.output))) + " reduction_percent=" +
+				tt.wantPercentage + " reduction_size=" +
+				formatSize(int64(len(tt.input)-len(tt.output)))
 			if !strings.Contains(logs.String(), wantLog) {
 				t.Fatalf("size reduction log missing:\n%s", logs.String())
+			}
+			if strings.Contains(logs.String(), "original_bytes=") ||
+				strings.Contains(logs.String(), "output_bytes=") ||
+				strings.Contains(logs.String(), "reduction_bytes=") {
+				t.Fatalf("legacy size fields present:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+func TestFormatSizeUsesDecimalUnits(t *testing.T) {
+	tests := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{999, "999 B"},
+		{-999, "-999 B"},
+		{1000, "1.0 KB"},
+		{-1500, "-1.5 KB"},
+		{10_000, "10.0 KB"},
+		{1_000_000, "1.0 MB"},
+		{1_200_000_000, "1.2 GB"},
+		{1_000_000_000_000, "1.0 TB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := formatSize(tt.bytes); got != tt.want {
+				t.Fatalf("formatSize(%d) = %q, want %q", tt.bytes, got, tt.want)
 			}
 		})
 	}
