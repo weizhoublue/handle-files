@@ -181,6 +181,33 @@ func TestRunRetainsSourceWhenCommandProducesNoOutput(t *testing.T) {
 	}
 }
 
+func TestRunRetainsSourceWhenOutputIsNotRegularFile(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "clip.mp4")
+	mustWrite(t, source, "video")
+	if err := os.Mkdir(filepath.Join(root, "clip_output.mp4"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{path: "/fake/ffmpeg"}
+
+	summary, err := Run(
+		context.Background(),
+		Options{Directory: root, Execute: true, Yes: true, FFArgs: []string{"-c:v", "libx264"}},
+		runner,
+		strings.NewReader(""),
+		testLogger(&bytes.Buffer{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Summary{Total: 1, Failed: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("source stat error = %v", err)
+	}
+}
+
 func TestRunPreviewDoesNotInvokeCompression(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "clip.mp4")

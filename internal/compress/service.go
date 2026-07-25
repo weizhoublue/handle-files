@@ -120,7 +120,11 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reade
 			logProgress(logger, summary)
 			continue
 		}
-		if _, err := os.Stat(output); err != nil {
+		info, err := os.Stat(output)
+		if err != nil || !info.Mode().IsRegular() {
+			if err == nil {
+				err = errors.New("output is not a regular file")
+			}
 			summary.Failed++
 			logger.Error("output_missing",
 				logx.Field{Key: "error", Value: err.Error()},
