@@ -19,9 +19,16 @@ var (
 	scanEntryInfo = func(dirEntry fs.DirEntry) (fs.FileInfo, error) {
 		return dirEntry.Info()
 	}
-	copyStream  = io.Copy
-	changeMode  = os.Chmod
-	changeTimes = os.Chtimes
+	copyStream          = io.Copy
+	openDestinationFile = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
+		return root.OpenFile(name, flag, perm)
+	}
+	changeMode = func(root *os.Root, name string, mode fs.FileMode) error {
+		return root.Chmod(name, mode)
+	}
+	changeTimes = func(root *os.Root, name string, accessTime, modificationTime time.Time) error {
+		return root.Chtimes(name, accessTime, modificationTime)
+	}
 )
 
 type Entry struct {
@@ -139,6 +146,12 @@ func Run(opts Options, logger logx.Logger) error {
 		return nil
 	}
 
+	destinationRoot, err := os.OpenRoot(opts.Destination)
+	if err != nil {
+		return fmt.Errorf("open destination root: %w", err)
+	}
+	defer destinationRoot.Close()
+
 	conflictedPaths := make(map[string]struct{})
 	for _, group := range comparison.CaseConflicts {
 		for _, path := range group {
@@ -150,7 +163,7 @@ func Run(opts Options, logger logx.Logger) error {
 	succeeded := 0
 	failed := 0
 	for completed, path := range candidates {
-		if err := copyFile(opts.Source, opts.Destination, path, source[path]); err != nil {
+		if err := copyFile(opts.Source, destinationRoot, path, source[path]); err != nil {
 			failed++
 			logger.Warn("copy_failed",
 				logx.Field{Key: "error", Value: err.Error()},
@@ -219,20 +232,16 @@ func caseConflicts(source map[string]Entry) [][]string {
 	return conflicts
 }
 
-func copyFile(sourceRoot, destinationRoot, relativePath string, entry Entry) error {
+func copyFile(sourceRoot string, destinationRoot *os.Root, relativePath string, entry Entry) error {
 	sourcePath := filepath.Join(sourceRoot, filepath.FromSlash(relativePath))
-	destinationPath := filepath.Join(destinationRoot, filepath.FromSlash(relativePath))
 	if err := verifyRegularFile(sourcePath); err != nil {
 		return fmt.Errorf("verify source: %w", err)
 	}
-	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
-		return fmt.Errorf("verify destination: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
-		return fmt.Errorf("create destination directory: %w", err)
-	}
-	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
-		return fmt.Errorf("verify destination: %w", err)
+	destinationName := filepath.Clean(filepath.FromSlash(relativePath))
+	if parent := filepath.Dir(destinationName); parent != "." {
+		if err := destinationRoot.MkdirAll(parent, 0o755); err != nil {
+			return fmt.Errorf("create destination directory: %w", err)
+		}
 	}
 
 	sourceFile, err := os.Open(sourcePath)
@@ -241,28 +250,22 @@ func copyFile(sourceRoot, destinationRoot, relativePath string, entry Entry) err
 	}
 	defer sourceFile.Close()
 
-	destinationFile, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, entry.Mode.Perm())
+	destinationFile, err := openDestinationFile(destinationRoot, destinationName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, entry.Mode.Perm())
 	if err != nil {
 		return fmt.Errorf("open destination: %w", err)
 	}
 	if _, err := copyStream(destinationFile, sourceFile); err != nil {
 		destinationFile.Close()
-		return copyFailure(destinationRoot, relativePath, "write destination", err)
+		return copyFailure(destinationRoot, destinationName, "write destination", err)
 	}
 	if err := destinationFile.Close(); err != nil {
-		return copyFailure(destinationRoot, relativePath, "close destination", err)
+		return copyFailure(destinationRoot, destinationName, "close destination", err)
 	}
-	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
-		return copyFailure(destinationRoot, relativePath, "verify destination before setting mode", err)
+	if err := changeMode(destinationRoot, destinationName, entry.Mode.Perm()); err != nil {
+		return copyFailure(destinationRoot, destinationName, "set destination mode", err)
 	}
-	if err := changeMode(destinationPath, entry.Mode.Perm()); err != nil {
-		return copyFailure(destinationRoot, relativePath, "set destination mode", err)
-	}
-	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
-		return copyFailure(destinationRoot, relativePath, "verify destination before setting modification time", err)
-	}
-	if err := changeTimes(destinationPath, entry.ModTime, entry.ModTime); err != nil {
-		return copyFailure(destinationRoot, relativePath, "set destination modification time", err)
+	if err := changeTimes(destinationRoot, destinationName, entry.ModTime, entry.ModTime); err != nil {
+		return copyFailure(destinationRoot, destinationName, "set destination modification time", err)
 	}
 	return nil
 }
@@ -278,55 +281,15 @@ func verifyRegularFile(path string) error {
 	return nil
 }
 
-func verifyDestinationPath(root, relativePath string) error {
-	rootInfo, err := os.Lstat(root)
-	if err != nil {
-		return err
-	}
-	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
-		return errors.New("destination root is not a directory")
-	}
-
-	relativePath = filepath.Clean(filepath.FromSlash(relativePath))
-	if relativePath == "." || filepath.IsAbs(relativePath) || relativePath == ".." ||
-		strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
-		return errors.New("destination path escapes root")
-	}
-
-	current := root
-	components := strings.Split(relativePath, string(filepath.Separator))
-	for index, component := range components {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("destination path component %q is a symlink", current)
-		}
-		if index < len(components)-1 && !info.IsDir() {
-			return fmt.Errorf("destination path component %q is not a directory", current)
-		}
-	}
-	return nil
-}
-
-func copyFailure(destinationRoot, relativePath, operation string, operationErr error) error {
+func copyFailure(destinationRoot *os.Root, relativePath, operation string, operationErr error) error {
 	if cleanupErr := cleanupPartial(destinationRoot, relativePath); cleanupErr != nil {
 		return fmt.Errorf("%s: %w (cleanup partial destination: %v)", operation, operationErr, cleanupErr)
 	}
 	return fmt.Errorf("%s: %w", operation, operationErr)
 }
 
-func cleanupPartial(destinationRoot, relativePath string) error {
-	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
-		return err
-	}
-	destinationPath := filepath.Join(destinationRoot, filepath.FromSlash(relativePath))
-	if err := os.Remove(destinationPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+func cleanupPartial(destinationRoot *os.Root, relativePath string) error {
+	if err := destinationRoot.Remove(relativePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

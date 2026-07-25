@@ -303,6 +303,47 @@ func TestRunDoesNotWriteOrCleanThroughDestinationSymlink(t *testing.T) {
 	}
 }
 
+func TestRunKeepsDestinationOperationsConfinedWhenParentChanges(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(source, "swapped", "file.txt"), "source", 0o600)
+	writeFile(t, filepath.Join(source, "continued.txt"), "continued", 0o600)
+	writeFile(t, filepath.Join(destination, "swapped", "placeholder"), "placeholder", 0o600)
+	writeFile(t, filepath.Join(outside, "file.txt"), "outside", 0o600)
+	var logs bytes.Buffer
+
+	original := openDestinationFile
+	openDestinationFile = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
+		if name == filepath.Join("swapped", "file.txt") {
+			if err := os.Rename(filepath.Join(destination, "swapped"), filepath.Join(destination, "moved")); err != nil {
+				return nil, err
+			}
+			if err := os.Symlink(outside, filepath.Join(destination, "swapped")); err != nil {
+				return nil, err
+			}
+		}
+		return root.OpenFile(name, flag, perm)
+	}
+	t.Cleanup(func() {
+		openDestinationFile = original
+	})
+
+	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
+		t.Fatal(err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(outside, "file.txt")); err != nil || string(contents) != "outside" {
+		t.Fatalf("parent swap changed outside file: contents=%q err=%v", contents, err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(destination, "continued.txt")); err != nil || string(contents) != "continued" {
+		t.Fatalf("safe candidate was not copied: contents=%q err=%v", contents, err)
+	}
+	if !strings.Contains(logs.String(), "event=copy_failed") ||
+		!strings.Contains(logs.String(), "event=progress completed=2 failed=1 succeeded=1 total=2") {
+		t.Fatalf("parent swap did not fail and continue:\n%s", logs.String())
+	}
+}
+
 func TestRunSkipsCaseConflictGroupsDuringCopy(t *testing.T) {
 	source := t.TempDir()
 	destination := t.TempDir()
@@ -356,11 +397,11 @@ func TestRunCleansPartialDestinationAfterInjectedFailures(t *testing.T) {
 			name: "chmod",
 			inject: func(t *testing.T, failedPath string) {
 				original := changeMode
-				changeMode = func(path string, mode fs.FileMode) error {
+				changeMode = func(root *os.Root, path string, mode fs.FileMode) error {
 					if path == failedPath {
 						return errors.New("injected chmod failure")
 					}
-					return os.Chmod(path, mode)
+					return root.Chmod(path, mode)
 				}
 				t.Cleanup(func() {
 					changeMode = original
@@ -371,11 +412,11 @@ func TestRunCleansPartialDestinationAfterInjectedFailures(t *testing.T) {
 			name: "chtimes",
 			inject: func(t *testing.T, failedPath string) {
 				original := changeTimes
-				changeTimes = func(path string, accessTime, modificationTime time.Time) error {
+				changeTimes = func(root *os.Root, path string, accessTime, modificationTime time.Time) error {
 					if path == failedPath {
 						return errors.New("injected chtimes failure")
 					}
-					return os.Chtimes(path, accessTime, modificationTime)
+					return root.Chtimes(path, accessTime, modificationTime)
 				}
 				t.Cleanup(func() {
 					changeTimes = original
@@ -416,7 +457,7 @@ func failedPathFor(failure, sourcePath, destinationPath string) string {
 	if failure == "write" {
 		return sourcePath
 	}
-	return destinationPath
+	return filepath.Base(destinationPath)
 }
 
 func TestRunEmitsProgressForEveryCopyCandidate(t *testing.T) {
