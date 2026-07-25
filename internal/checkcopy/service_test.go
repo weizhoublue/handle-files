@@ -349,6 +349,9 @@ func TestRunSkipsCaseConflictGroupsDuringCopy(t *testing.T) {
 	destination := t.TempDir()
 	writeFile(t, filepath.Join(source, "Dir", "File.txt"), "first", 0o600)
 	writeFile(t, filepath.Join(source, "dir", "file.TXT"), "second", 0o600)
+	writeFile(t, filepath.Join(source, "A.txt"), "third", 0o600)
+	writeFile(t, filepath.Join(source, "a.txt"), "fourth", 0o600)
+	writeFile(t, filepath.Join(source, "A.TXT"), "fifth", 0o600)
 	writeFile(t, filepath.Join(source, "other.txt"), "copied", 0o600)
 	writeFile(t, filepath.Join(destination, "dir", "file.txt"), "destination", 0o600)
 	var logs bytes.Buffer
@@ -367,6 +370,9 @@ func TestRunSkipsCaseConflictGroupsDuringCopy(t *testing.T) {
 	}
 	if got := strings.Count(logs.String(), "event=case_conflicts_skipped"); got != 1 {
 		t.Fatalf("case-conflict warnings = %d, want one:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "event=case_conflicts_skipped files=5 groups=2") {
+		t.Fatalf("case-conflict warning counts = %s", logs.String())
 	}
 	if strings.Index(logs.String(), "event=case_conflicts_skipped") < strings.LastIndex(logs.String(), "event=progress") {
 		t.Fatalf("case-conflict warning was emitted before processing completed:\n%s", logs.String())

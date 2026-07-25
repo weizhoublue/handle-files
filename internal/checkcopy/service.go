@@ -182,6 +182,7 @@ func Run(opts Options, logger logx.Logger) error {
 	}
 	if len(comparison.CaseConflicts) > 0 {
 		logger.Warn("case_conflicts_skipped",
+			logx.Field{Key: "files", Value: strconv.Itoa(len(conflictedPaths))},
 			logx.Field{Key: "groups", Value: strconv.Itoa(len(comparison.CaseConflicts))},
 			logx.Field{Key: "paths", Value: strings.Join(conflictedPathsInOrder(comparison.CaseConflicts), ",")},
 		)
