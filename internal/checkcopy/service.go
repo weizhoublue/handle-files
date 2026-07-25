@@ -168,25 +168,35 @@ func Run(opts Options, logger logx.Logger) error {
 	for completed, path := range candidates {
 		if err := copyFile(opts.Source, destinationRoot, path, source[path]); err != nil {
 			failed++
-			logger.Warn("copy_failed",
-				logx.Field{Key: "error", Value: err.Error()},
-				logx.Field{Key: "path", Value: path},
+			logger.WarnProgress("copy_failed",
+				[]logx.Field{
+					{Key: "error", Value: err.Error()},
+					{Key: "path", Value: path},
+				},
+				copyProgressFields(completed+1, len(candidates), succeeded, failed),
 			)
 		} else {
 			succeeded++
-			logger.Info("copied", logx.Field{Key: "path", Value: path})
+			logger.InfoProgress(
+				"copied",
+				[]logx.Field{{Key: "path", Value: path}},
+				copyProgressFields(completed+1, len(candidates), succeeded, failed),
+			)
 		}
-		logger.Info("progress",
-			logx.Field{Key: "completed", Value: strconv.Itoa(completed + 1)},
-			logx.Field{Key: "total", Value: strconv.Itoa(len(candidates))},
-			logx.Field{Key: "succeeded", Value: strconv.Itoa(succeeded)},
-			logx.Field{Key: "failed", Value: strconv.Itoa(failed)},
-		)
 	}
 	logScanSummary(logger, source, destination)
 	logDifferenceSummary(logger, source, comparison, succeeded, failed, true)
 	logCaseConflicts(logger, comparison.CaseConflicts, "case_conflicts_skipped")
 	return nil
+}
+
+func copyProgressFields(completed, total, succeeded, failed int) []logx.Field {
+	return []logx.Field{
+		{Key: "completed", Value: strconv.Itoa(completed)},
+		{Key: "total", Value: strconv.Itoa(total)},
+		{Key: "succeeded", Value: strconv.Itoa(succeeded)},
+		{Key: "failed", Value: strconv.Itoa(failed)},
+	}
 }
 
 func withoutConflictedPaths(paths []string, conflicted map[string]struct{}) []string {

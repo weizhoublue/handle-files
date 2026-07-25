@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/weizhoublue/handle-files/internal/checkcopy"
 	"github.com/weizhoublue/handle-files/internal/logx"
@@ -16,7 +15,7 @@ func main() {
 }
 
 func run() int {
-	logger := logx.Logger{Out: os.Stdout, Err: os.Stderr, Now: time.Now}
+	logger := logx.Logger{Out: os.Stdout, Err: os.Stderr}
 	options, err := checkcopy.ParseOptions(os.Args[1:])
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(os.Stdout, checkcopy.Usage())

@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/weizhoublue/handle-files/internal/logx"
 )
@@ -82,9 +81,8 @@ func TestRunChecksFFmpegBeforeCompressingAndDeletesSourceAfterSuccess(t *testing
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, Yes: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
-		strings.NewReader(""),
 		testLogger(&logs),
 	)
 	if err != nil {
@@ -106,11 +104,12 @@ func TestRunChecksFFmpegBeforeCompressingAndDeletesSourceAfterSuccess(t *testing
 	if _, err := os.Stat(output); err != nil {
 		t.Fatalf("output stat error = %v", err)
 	}
-	if got := strings.Count(logs.String(), "event=progress"); got != 1 {
-		t.Fatalf("progress records = %d, want 1:\n%s", got, logs.String())
+	if got := strings.Count(logs.String(), "progress"); got != 0 {
+		t.Fatalf("progress records = %d, want 0:\n%s", got, logs.String())
 	}
-	if !strings.Contains(logs.String(), "completed=1 failed=0 skipped=0 succeeded=1 total=1") {
-		t.Fatalf("final progress missing counters:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "INFO, compressed ") ||
+		!strings.Contains(logs.String(), "[ completed=1 failed=0 skipped=0 succeeded=1 total=1 ]") {
+		t.Fatalf("compression progress missing counters:\n%s", logs.String())
 	}
 }
 
@@ -145,9 +144,8 @@ func TestRunReportsSizeReductionForSuccessfulCompression(t *testing.T) {
 
 			summary, err := Run(
 				context.Background(),
-				Options{Directory: root, Execute: true, Yes: true, FFArgs: []string{"-c:v", "libx264"}},
+				Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 				runner,
-				strings.NewReader(""),
 				testLogger(&logs),
 			)
 			if err != nil {
@@ -156,7 +154,7 @@ func TestRunReportsSizeReductionForSuccessfulCompression(t *testing.T) {
 			if want := (Summary{Total: 1, Succeeded: 1}); summary != want {
 				t.Fatalf("Run() summary = %#v, want %#v", summary, want)
 			}
-			wantLog := "event=compressed input=" + source + " original_bytes=" + strconv.Itoa(len(tt.input)) +
+			wantLog := "INFO, compressed input=" + source + " original_bytes=" + strconv.Itoa(len(tt.input)) +
 				" output=" + output + " output_bytes=" + strconv.Itoa(len(tt.output)) +
 				" reduction_bytes=" + tt.wantReduction + " reduction_percent=" + tt.wantPercentage
 			if !strings.Contains(logs.String(), wantLog) {
@@ -185,9 +183,8 @@ func TestRunCleansFailedOutputAndRetainsSource(t *testing.T) {
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, Yes: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
-		strings.NewReader(""),
 		testLogger(&logs),
 	)
 	if err != nil {
@@ -202,11 +199,12 @@ func TestRunCleansFailedOutputAndRetainsSource(t *testing.T) {
 	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("output stat error = %v, want not exist", err)
 	}
-	if got := strings.Count(logs.String(), "event=progress"); got != 1 {
-		t.Fatalf("progress records = %d, want 1:\n%s", got, logs.String())
+	if got := strings.Count(logs.String(), "progress"); got != 0 {
+		t.Fatalf("progress records = %d, want 0:\n%s", got, logs.String())
 	}
-	if !strings.Contains(logs.String(), "completed=1 failed=1 skipped=0 succeeded=0 total=1") {
-		t.Fatalf("final progress missing counters:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "ERROR, compress_failed ") ||
+		!strings.Contains(logs.String(), "[ completed=1 failed=1 skipped=0 succeeded=0 total=1 ]") {
+		t.Fatalf("compression progress missing counters:\n%s", logs.String())
 	}
 }
 
@@ -218,9 +216,8 @@ func TestRunRetainsSourceWhenCommandProducesNoOutput(t *testing.T) {
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, Yes: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
-		strings.NewReader(""),
 		testLogger(&bytes.Buffer{}),
 	)
 	if err != nil {
@@ -245,9 +242,8 @@ func TestRunRetainsSourceWhenOutputIsNotRegularFile(t *testing.T) {
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, Yes: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
-		strings.NewReader(""),
 		testLogger(&bytes.Buffer{}),
 	)
 	if err != nil {
@@ -271,7 +267,6 @@ func TestRunPreviewDoesNotInvokeCompression(t *testing.T) {
 		context.Background(),
 		Options{Directory: root, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
-		strings.NewReader(""),
 		testLogger(&bytes.Buffer{}),
 	)
 	if err != nil {
@@ -288,7 +283,7 @@ func TestRunPreviewDoesNotInvokeCompression(t *testing.T) {
 	}
 }
 
-func TestRunRequiresConfirmationForEachLiveFile(t *testing.T) {
+func TestRunExecutesEachLiveFileWithoutConfirmation(t *testing.T) {
 	root := t.TempDir()
 	first := filepath.Join(root, "a.mp4")
 	second := filepath.Join(root, "b.mp4")
@@ -309,26 +304,33 @@ func TestRunRequiresConfirmationForEachLiveFile(t *testing.T) {
 		context.Background(),
 		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
-		strings.NewReader("n\ny\n"),
 		testLogger(&logs),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Summary{Total: 2, Succeeded: 1, Skipped: 1}); summary != want {
+	if want := (Summary{Total: 2, Succeeded: 2}); summary != want {
 		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
 	}
-	if got := len(runner.calls); got != 2 {
-		t.Fatalf("runner calls = %d, want 2", got)
+	if got := len(runner.calls); got != 3 {
+		t.Fatalf("runner calls = %d, want 3", got)
 	}
-	if _, err := os.Stat(first); err != nil {
-		t.Fatalf("skipped source stat error = %v", err)
+	if runner.calls[0].args[0] != "-version" ||
+		runner.calls[1].args[0] != "-i" || runner.calls[2].args[0] != "-i" {
+		t.Fatalf("runner calls = %#v, want version call followed by two encodes", runner.calls)
+	}
+	if _, err := os.Stat(first); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first source stat error = %v, want not exist", err)
 	}
 	if _, err := os.Stat(second); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("confirmed source stat error = %v, want not exist", err)
 	}
-	if got := strings.Count(logs.String(), "event=progress"); got != 2 {
-		t.Fatalf("progress records = %d, want 2:\n%s", got, logs.String())
+	if got := strings.Count(logs.String(), "progress"); got != 0 {
+		t.Fatalf("progress records = %d, want 0:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "INFO, compressed ") ||
+		!strings.Contains(logs.String(), "[ completed=2 failed=0 skipped=0 succeeded=2 total=2 ]") {
+		t.Fatalf("compression progress missing counters:\n%s", logs.String())
 	}
 }
 
@@ -338,7 +340,6 @@ func TestRunReturnsDependencyErrors(t *testing.T) {
 			context.Background(),
 			Options{Directory: t.TempDir()},
 			&fakeRunner{lookPathErr: errors.New("not found")},
-			strings.NewReader(""),
 			testLogger(&bytes.Buffer{}),
 		)
 		if err == nil || !strings.Contains(err.Error(), "ffmpeg") {
@@ -360,7 +361,6 @@ func TestRunReturnsDependencyErrors(t *testing.T) {
 			context.Background(),
 			Options{Directory: t.TempDir()},
 			runner,
-			strings.NewReader(""),
 			testLogger(&bytes.Buffer{}),
 		)
 		if err == nil || !strings.Contains(err.Error(), "ffmpeg") || !strings.Contains(err.Error(), "version") {
@@ -386,8 +386,5 @@ func testLogger(out *bytes.Buffer) logx.Logger {
 	return logx.Logger{
 		Out: out,
 		Err: out,
-		Now: func() time.Time {
-			return time.Date(2026, 7, 25, 6, 12, 4, 0, time.UTC)
-		},
 	}
 }

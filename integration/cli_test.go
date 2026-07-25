@@ -17,7 +17,7 @@ func TestCompressVedioExecuteUsesFakeFFmpeg(t *testing.T) {
 	writeFile(t, input, "input")
 	fakeBin := writeFakeFFmpeg(t)
 
-	output, err := runCommand(binary, []string{"--dir", root, "--execute", "--yes"}, fakeBin, nil)
+	output, err := runCommand(binary, []string{"--dir", root, "--execute"}, fakeBin, nil)
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, output)
 	}
@@ -27,25 +27,37 @@ func TestCompressVedioExecuteUsesFakeFFmpeg(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "clip_output.mp4")); err != nil {
 		t.Fatalf("compressed output missing: %v", err)
 	}
-	if !strings.Contains(string(output), "event=progress") ||
-		!strings.Contains(string(output), "completed=1") ||
+	assertReadableOutput(t, output, "INFO, compressed ")
+	if !strings.Contains(string(output), "completed=1") ||
 		!strings.Contains(string(output), "total=1") {
 		t.Fatalf("missing progress: %s", output)
 	}
 }
 
-func TestCompressVedioExecuteReadsConfirmationFromStdin(t *testing.T) {
+func TestCompressVedioExecuteCompressesAllFilesWithoutStdin(t *testing.T) {
 	binary := buildBinary(t, "./cmd/compress-vedio")
 	root := t.TempDir()
-	input := filepath.Join(root, "clip.mp4")
-	writeFile(t, input, "input")
+	firstInput := filepath.Join(root, "first.mp4")
+	secondInput := filepath.Join(root, "second.mp4")
+	writeFile(t, firstInput, "first")
+	writeFile(t, secondInput, "second")
 
-	output, err := runCommand(binary, []string{"--dir", root, "--execute"}, writeFakeFFmpeg(t), strings.NewReader("y\n"))
+	output, err := runCommand(binary, []string{"--dir", root, "--execute"}, writeFakeFFmpeg(t), nil)
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, output)
 	}
-	if _, err := os.Stat(input); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("source still exists: %v", err)
+	for _, input := range []string{firstInput, secondInput} {
+		if _, err := os.Stat(input); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("source still exists: %s: %v", input, err)
+		}
+	}
+	for _, outputPath := range []string{
+		filepath.Join(root, "first_output.mp4"),
+		filepath.Join(root, "second_output.mp4"),
+	} {
+		if _, err := os.Stat(outputPath); err != nil {
+			t.Fatalf("compressed output missing: %s: %v", outputPath, err)
+		}
 	}
 }
 
@@ -75,9 +87,7 @@ func TestCheckCopyReportOnlyLeavesDestinationUnchanged(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(destination, "clip.mp4")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("report-only command wrote destination: %v", err)
 	}
-	if !strings.Contains(string(output), "event=copy_skipped") {
-		t.Fatalf("missing report-only result: %s", output)
-	}
+	assertReadableOutput(t, output, "INFO, copy_skipped ")
 }
 
 func TestCheckCopyCopyCreatesMissingTarget(t *testing.T) {
@@ -100,9 +110,7 @@ func TestCheckCopyCopyCreatesMissingTarget(t *testing.T) {
 	if string(copied) != "input" {
 		t.Fatalf("copied content = %q, want %q", copied, "input")
 	}
-	if !strings.Contains(string(output), "event=copied") {
-		t.Fatalf("missing copy result: %s", output)
-	}
+	assertReadableOutput(t, output, "INFO, copied ")
 }
 
 func TestCheckCopyHelpPrintsUsage(t *testing.T) {
@@ -122,9 +130,7 @@ func TestInvalidFlagsFailWithStructuredValidationError(t *testing.T) {
 			if err == nil {
 				t.Fatalf("invalid flag succeeded: %s", output)
 			}
-			if !strings.Contains(string(output), "event=validation_failed") {
-				t.Fatalf("missing validation event: %s", output)
-			}
+			assertReadableOutput(t, output, "ERROR, validation_failed ")
 		})
 	}
 }
@@ -135,8 +141,19 @@ func TestCompressVedioMissingFFmpegFailsWithStructuredError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("missing ffmpeg succeeded: %s", output)
 	}
-	if !strings.Contains(string(output), "event=run_failed") {
-		t.Fatalf("missing run failure event: %s", output)
+	assertReadableOutput(t, output, "ERROR, run_failed ")
+}
+
+func assertReadableOutput(t *testing.T, output []byte, expected string) {
+	t.Helper()
+	text := string(output)
+	if !strings.Contains(text, expected) {
+		t.Fatalf("missing %q: %s", expected, output)
+	}
+	for _, forbidden := range []string{"time=", "level=", "event="} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("output contains legacy field %q: %s", forbidden, output)
+		}
 	}
 }
 

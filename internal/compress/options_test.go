@@ -54,10 +54,10 @@ func TestParseFFOptionsRejectsMalformedValues(t *testing.T) {
 	}
 }
 
-func TestParseOptionsRejectsInvalidCombinations(t *testing.T) {
+func TestParseOptionsRejectsConfirmationFlag(t *testing.T) {
 	_, err := ParseOptions([]string{"--dir", t.TempDir(), "--yes"})
-	if err == nil || !strings.Contains(err.Error(), "--yes requires --execute") {
-		t.Fatalf("ParseOptions() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("ParseOptions(--yes) error = %v", err)
 	}
 }
 
@@ -93,7 +93,6 @@ func TestParseOptionsAcceptsShortFlagsAndExplicitValues(t *testing.T) {
 	got, err := ParseOptions([]string{
 		"-d", dir,
 		"-x",
-		"-y",
 		"-f", `-c:v libx264 -metadata title="A clip"`,
 	})
 	if err != nil {
@@ -102,10 +101,9 @@ func TestParseOptionsAcceptsShortFlagsAndExplicitValues(t *testing.T) {
 	want := Options{
 		Directory: dir,
 		Execute:   true,
-		Yes:       true,
 		FFArgs:    []string{"-c:v", "libx264", "-metadata", "title=A clip"},
 	}
-	if got.Directory != want.Directory || got.Execute != want.Execute || got.Yes != want.Yes ||
+	if got.Directory != want.Directory || got.Execute != want.Execute ||
 		!slices.Equal(got.FFArgs, want.FFArgs) {
 		t.Fatalf("ParseOptions() = %#v, want %#v", got, want)
 	}
@@ -116,7 +114,6 @@ func TestParseOptionsAcceptsLongFlagsAndQuotedEscapedFFOptions(t *testing.T) {
 	got, err := ParseOptions([]string{
 		"--dir", dir,
 		"--execute",
-		"--yes",
 		"--ff-option", `-metadata title="A clip" -vf scale=1280\:720`,
 	})
 	if err != nil {

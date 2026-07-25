@@ -1,7 +1,6 @@
 package compress
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -42,7 +41,7 @@ type Summary struct {
 	Failed    int
 }
 
-func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reader, logger logx.Logger) (Summary, error) {
+func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Logger) (Summary, error) {
 	logger = usableLogger(logger)
 	if runner == nil {
 		return Summary{}, errors.New("ffmpeg command runner is required")
@@ -79,27 +78,8 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reade
 		return summary, nil
 	}
 
-	if input == nil {
-		input = strings.NewReader("")
-	}
-	confirmations := bufio.NewScanner(input)
 	for _, path := range files {
 		output := outputPath(path)
-		if !opts.Yes {
-			logger.Info("confirm",
-				logx.Field{Key: "input", Value: path},
-				logx.Field{Key: "output", Value: output},
-			)
-			if !confirmations.Scan() || !strings.EqualFold(strings.TrimSpace(confirmations.Text()), "y") {
-				summary.Skipped++
-				logger.Info("skip",
-					logx.Field{Key: "path", Value: path},
-					logx.Field{Key: "reason", Value: "not_confirmed"},
-				)
-				logProgress(logger, summary)
-				continue
-			}
-		}
 
 		args := make([]string, 0, len(opts.FFArgs)+3)
 		args = append(args, "-i", path)
@@ -107,17 +87,14 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reade
 		args = append(args, output)
 		if err := runner.Run(ctx, ffmpegPath, args...); err != nil {
 			summary.Failed++
-			logger.Error("compress_failed",
-				logx.Field{Key: "error", Value: err.Error()},
-				logx.Field{Key: "path", Value: path},
-			)
-			if cleanupErr := os.Remove(output); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
-				logger.Warn("cleanup_failed",
-					logx.Field{Key: "error", Value: cleanupErr.Error()},
-					logx.Field{Key: "path", Value: output},
-				)
+			fields := []logx.Field{
+				{Key: "error", Value: err.Error()},
+				{Key: "path", Value: path},
 			}
-			logProgress(logger, summary)
+			if cleanupErr := os.Remove(output); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				fields = append(fields, logx.Field{Key: "cleanup_error", Value: cleanupErr.Error()})
+			}
+			logger.ErrorProgress("compress_failed", fields, progressFields(summary))
 			continue
 		}
 		info, err := os.Stat(output)
@@ -126,21 +103,19 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reade
 				err = errors.New("output is not a regular file")
 			}
 			summary.Failed++
-			logger.Error("output_missing",
-				logx.Field{Key: "error", Value: err.Error()},
-				logx.Field{Key: "path", Value: output},
-			)
-			logProgress(logger, summary)
+			logger.ErrorProgress("output_missing", []logx.Field{
+				{Key: "error", Value: err.Error()},
+				{Key: "path", Value: output},
+			}, progressFields(summary))
 			continue
 		}
 		sourceInfo, err := os.Stat(path)
 		if err != nil {
 			summary.Failed++
-			logger.Error("source_size_failed",
-				logx.Field{Key: "error", Value: err.Error()},
-				logx.Field{Key: "path", Value: path},
-			)
-			logProgress(logger, summary)
+			logger.ErrorProgress("source_size_failed", []logx.Field{
+				{Key: "error", Value: err.Error()},
+				{Key: "path", Value: path},
+			}, progressFields(summary))
 			continue
 		}
 		reductionBytes := sourceInfo.Size() - info.Size()
@@ -148,29 +123,24 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reade
 		if sourceInfo.Size() != 0 {
 			reductionPercent = float64(reductionBytes) / float64(sourceInfo.Size()) * 100
 		}
-		logger.Info("compressed",
-			logx.Field{Key: "input", Value: path},
-			logx.Field{Key: "output", Value: output},
-			logx.Field{Key: "original_bytes", Value: strconv.FormatInt(sourceInfo.Size(), 10)},
-			logx.Field{Key: "output_bytes", Value: strconv.FormatInt(info.Size(), 10)},
-			logx.Field{Key: "reduction_bytes", Value: strconv.FormatInt(reductionBytes, 10)},
-			logx.Field{Key: "reduction_percent", Value: fmt.Sprintf("%.2f", reductionPercent)},
-		)
 		if err := os.Remove(path); err != nil {
 			summary.Failed++
-			logger.Error("source_delete_failed",
-				logx.Field{Key: "error", Value: err.Error()},
-				logx.Field{Key: "path", Value: path},
-			)
-			logProgress(logger, summary)
+			logger.ErrorProgress("source_delete_failed", []logx.Field{
+				{Key: "error", Value: err.Error()},
+				{Key: "path", Value: path},
+			}, progressFields(summary))
 			continue
 		}
 
 		summary.Succeeded++
-		logProgress(logger, summary)
-	}
-	if err := confirmations.Err(); err != nil {
-		return summary, fmt.Errorf("read compression confirmation: %w", err)
+		logger.InfoProgress("compressed", []logx.Field{
+			{Key: "input", Value: path},
+			{Key: "output", Value: output},
+			{Key: "original_bytes", Value: strconv.FormatInt(sourceInfo.Size(), 10)},
+			{Key: "output_bytes", Value: strconv.FormatInt(info.Size(), 10)},
+			{Key: "reduction_bytes", Value: strconv.FormatInt(reductionBytes, 10)},
+			{Key: "reduction_percent", Value: fmt.Sprintf("%.2f", reductionPercent)},
+		}, progressFields(summary))
 	}
 	logSummary(logger, summary)
 	return summary, nil
@@ -220,14 +190,14 @@ func outputPath(input string) string {
 	return stem + "_output" + extension
 }
 
-func logProgress(logger logx.Logger, summary Summary) {
-	logger.Info("progress",
-		logx.Field{Key: "completed", Value: strconv.Itoa(summary.Succeeded + summary.Skipped + summary.Failed)},
-		logx.Field{Key: "total", Value: strconv.Itoa(summary.Total)},
-		logx.Field{Key: "succeeded", Value: strconv.Itoa(summary.Succeeded)},
-		logx.Field{Key: "skipped", Value: strconv.Itoa(summary.Skipped)},
-		logx.Field{Key: "failed", Value: strconv.Itoa(summary.Failed)},
-	)
+func progressFields(summary Summary) []logx.Field {
+	return []logx.Field{
+		{Key: "completed", Value: strconv.Itoa(summary.Succeeded + summary.Skipped + summary.Failed)},
+		{Key: "total", Value: strconv.Itoa(summary.Total)},
+		{Key: "succeeded", Value: strconv.Itoa(summary.Succeeded)},
+		{Key: "skipped", Value: strconv.Itoa(summary.Skipped)},
+		{Key: "failed", Value: strconv.Itoa(summary.Failed)},
+	}
 }
 
 func logSummary(logger logx.Logger, summary Summary) {
