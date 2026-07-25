@@ -21,8 +21,13 @@ One Ubuntu job:
    - `dist/macos-arm64/check-copy`
    - `dist/macos-amd64/compress-vedio`
    - `dist/macos-amd64/check-copy`
-6. Creates a GitHub Release with generated release notes and uploads the four executables.
-7. Derives the tag from `GITHUB_REF`, creates `release/<tag>` at the tagged commit, and pushes it to `origin`.
+6. Copies them to `dist/release/` with unique asset names:
+   - `compress-vedio-macos-arm64`
+   - `check-copy-macos-arm64`
+   - `compress-vedio-macos-amd64`
+   - `check-copy-macos-amd64`
+7. Creates a GitHub Release with generated release notes and uploads the four uniquely named assets.
+8. Derives the tag from `GITHUB_REF`, creates `release/<tag>` at the tagged commit, and pushes it to `origin`.
 
 ## Failure behavior
 
