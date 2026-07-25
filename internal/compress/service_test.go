@@ -247,15 +247,12 @@ func TestRunConfigLogsSettingsAndStartBeforeCompressed(t *testing.T) {
 		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
 	}
 	logs := out.String()
-	if !strings.Contains(logs, "INFO, run_config ") ||
-		!strings.Contains(logs, "source="+sourceRoot) ||
-		!strings.Contains(logs, "output_root="+destinationRoot) ||
-		!strings.Contains(logs, "execute=true") ||
-		!strings.Contains(logs, "remove=false") ||
-		!strings.Contains(logs, "ffmpeg_args=-c:v libx264 -preset slow") {
-		t.Fatalf("run_config log missing settings:\n%s", logs)
+	wantRunConfig := "INFO, run config:  execute_copy=true ffmpeg_args=-c:v libx264 -preset slow output_dir=" +
+		destinationRoot + " remove_original=false source_dir=" + sourceRoot + "\n"
+	if !strings.Contains(logs, wantRunConfig) {
+		t.Fatalf("run config log missing settings:\n%s", logs)
 	}
-	runConfigIndex := strings.Index(logs, "INFO, run_config ")
+	runConfigIndex := strings.Index(logs, wantRunConfig)
 	startedIndex := strings.Index(logs, "INFO, compress_started ")
 	compressedIndex := strings.Index(logs, "INFO, compressed input="+input+" ")
 	if runConfigIndex == -1 || startedIndex == -1 || compressedIndex == -1 {
