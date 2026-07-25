@@ -37,6 +37,7 @@ func ParseOptions(args []string) (Options, error) {
 	fs.StringVar(&destination, "dest", "", "destination directory")
 	fs.StringVar(&destination, "d", "", "destination directory")
 	fs.StringVar(&remove, "remove", remove, "remove source after successful compression")
+	fs.StringVar(&remove, "r", remove, "remove source after successful compression")
 	fs.BoolVar(&execute, "execute", false, "compress files")
 	fs.BoolVar(&execute, "x", false, "compress files")
 	fs.StringVar(&ffOption, "ff-option", "", "ffmpeg options")
@@ -111,12 +112,12 @@ func ParseOptions(args []string) (Options, error) {
 }
 
 func Usage() string {
-	return `Usage: compress-vedio --source/-s <directory> [--dest/-d <directory>] [--remove <true|false>] [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
+	return `Usage: compress-vedio --source/-s <directory> [--dest/-d <directory>] [--remove/-r <true|false>] [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
 
 Options:
   --source, -s      source directory
   --dest, -d        destination directory
-  --remove          remove source after successful compression, 默认值 true
+  --remove, -r      remove source after successful compression, 默认值 true
   --execute, -x     compress files
   --ff-option, -f   ffmpeg options, 默认值 "-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k"
   --help, -h        show help

@@ -177,14 +177,36 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 		logger.InfoProgress("compressed", []logx.Field{
 			{Key: "input", Value: path},
 			{Key: "output", Value: output},
-			{Key: "original_bytes", Value: strconv.FormatInt(sourceInfo.Size(), 10)},
-			{Key: "output_bytes", Value: strconv.FormatInt(info.Size(), 10)},
-			{Key: "reduction_bytes", Value: strconv.FormatInt(reductionBytes, 10)},
+			{Key: "original_size", Value: formatSize(sourceInfo.Size())},
+			{Key: "output_size", Value: formatSize(info.Size())},
+			{Key: "reduction_size", Value: formatSize(reductionBytes)},
 			{Key: "reduction_percent", Value: fmt.Sprintf("%.2f", reductionPercent)},
 		}, progressFields(summary))
 	}
 	logSummary(logger, summary)
 	return summary, nil
+}
+
+func formatSize(bytes int64) string {
+	const base = 1000
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	sign := ""
+	magnitude := uint64(bytes)
+	if bytes < 0 {
+		sign = "-"
+		magnitude = uint64(-(bytes + 1)) + 1
+	}
+	if magnitude < base {
+		return fmt.Sprintf("%s%d B", sign, magnitude)
+	}
+
+	size := float64(magnitude)
+	unit := 0
+	for size >= base && unit < len(units)-1 {
+		size /= base
+		unit++
+	}
+	return fmt.Sprintf("%s%.1f %s", sign, size, units[unit])
 }
 
 func discoverMP4Files(root string) ([]string, error) {

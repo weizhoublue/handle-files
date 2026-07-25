@@ -91,6 +91,31 @@ func TestParseOptionsAcceptsRemoveEqualsForm(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAcceptsRemoveShortAlias(t *testing.T) {
+	source := t.TempDir()
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--source", source, "-r", "false"}, false},
+		{[]string{"--source", source, "-r=false"}, false},
+		{[]string{"--source", source, "-r=true"}, true},
+	}
+
+	for _, tt := range tests {
+		got, err := ParseOptions(tt.args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Remove != tt.want {
+			t.Fatalf("ParseOptions(%#v).Remove = %t, want %t", tt.args, got.Remove, tt.want)
+		}
+	}
+	if !strings.Contains(Usage(), "--remove/-r") {
+		t.Fatalf("Usage() = %q, want --remove/-r", Usage())
+	}
+}
+
 func TestParseOptionsRejectsUndefinedDirFlag(t *testing.T) {
 	_, err := ParseOptions([]string{"--dir", t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
