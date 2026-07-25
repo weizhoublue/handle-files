@@ -35,6 +35,10 @@ jobs:
           test -x dist/release/check-copy-macos-arm64
           test -x dist/release/compress-vedio-macos-amd64
           test -x dist/release/check-copy-macos-amd64
+          file dist/release/compress-vedio-macos-arm64 | grep -q "Mach-O.*arm64"
+          file dist/release/check-copy-macos-arm64 | grep -q "Mach-O.*arm64"
+          file dist/release/compress-vedio-macos-amd64 | grep -q "Mach-O.*x86_64"
+          file dist/release/check-copy-macos-amd64 | grep -q "Mach-O.*x86_64"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
