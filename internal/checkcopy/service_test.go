@@ -110,7 +110,7 @@ func TestScanWarnsAndContinuesAfterEntryInformationFailure(t *testing.T) {
 	if _, ok := got["good.txt"]; !ok {
 		t.Fatalf("Scan() did not continue after entry failure: %#v", got)
 	}
-	if !strings.Contains(logs.String(), "event=scan_info_failed") {
+	if !strings.Contains(logs.String(), "WARN, scan_info_failed") {
 		t.Fatalf("Scan() logs = %q, want scan_info_failed warning", logs.String())
 	}
 }
@@ -195,7 +195,7 @@ func TestRunReportOnlyDoesNotWriteCopyCandidates(t *testing.T) {
 	if string(contents) != "dst" {
 		t.Fatalf("report-only destination contents = %q, want %q", contents, "dst")
 	}
-	if strings.Contains(logs.String(), "event=progress") {
+	if strings.Contains(logs.String(), "progress") {
 		t.Fatalf("report-only progress logs = %q, want no copy progress", logs.String())
 	}
 }
@@ -213,13 +213,13 @@ func TestRunReportOnlyReportsCaseConflictsAfterComparison(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(destination, "A.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("report-only case conflict wrote destination: %v", err)
 	}
-	if got := strings.Count(logs.String(), "event=case_conflicts_reported"); got != 1 {
+	if got := strings.Count(logs.String(), "WARN, case_conflicts_reported"); got != 1 {
 		t.Fatalf("case-conflict warnings = %d, want one:\n%s", got, logs.String())
 	}
-	if !strings.Contains(logs.String(), "event=case_conflicts_reported files=2 groups=1 paths=A.txt,a.txt") {
+	if !strings.Contains(logs.String(), "WARN, case_conflicts_reported files=2 groups=1 paths=A.txt,a.txt") {
 		t.Fatalf("case-conflict warning fields = %s", logs.String())
 	}
-	if !strings.HasSuffix(logs.String(), "event=case_conflicts_reported files=2 groups=1 paths=A.txt,a.txt\n") {
+	if !strings.HasSuffix(logs.String(), "WARN, case_conflicts_reported files=2 groups=1 paths=A.txt,a.txt\n") {
 		t.Fatalf("case-conflict warning was not final:\n%s", logs.String())
 	}
 }
@@ -242,12 +242,12 @@ func TestRunEmitsScanAndDifferenceSummaries(t *testing.T) {
 			if err := Run(Options{Source: source, Destination: destination, Copy: copyMode}, testLogger(&logs)); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(logs.String(), "event=scan_summary destination_files=4 source_files=4") {
+			if !strings.Contains(logs.String(), "INFO, scan_summary destination_files=4 source_files=4") {
 				t.Fatalf("scan summary = %s", logs.String())
 			}
-			differenceSummary := "event=difference_summary consistent=1 destination_larger=1 extra=1 missing=1 source_larger=1"
+			differenceSummary := "INFO, difference_summary consistent=1 destination_larger=1 extra=1 missing=1 source_larger=1"
 			if copyMode {
-				differenceSummary = "event=difference_summary consistent=1 copied=2 destination_larger=1 extra=1 failed=0 missing=1 source_larger=1"
+				differenceSummary = "INFO, difference_summary consistent=1 copied=2 destination_larger=1 extra=1 failed=0 missing=1 source_larger=1"
 			}
 			if !strings.Contains(logs.String(), differenceSummary) {
 				t.Fatalf("difference summary = %s", logs.String())
@@ -353,10 +353,7 @@ func TestRunDoesNotWriteOrCleanThroughDestinationSymlink(t *testing.T) {
 	if contents, err := os.ReadFile(filepath.Join(destination, "continued.txt")); err != nil || string(contents) != "continued" {
 		t.Fatalf("safe candidate was not copied: contents=%q err=%v", contents, err)
 	}
-	if !strings.Contains(logs.String(), "event=copy_failed") ||
-		!strings.Contains(logs.String(), "event=progress completed=2 failed=1 succeeded=1 total=2") {
-		t.Fatalf("unsafe destination did not fail and continue:\n%s", logs.String())
-	}
+	requireCopyFailureRecord(t, logs.String())
 }
 
 func TestRunKeepsDestinationOperationsConfinedWhenParentChanges(t *testing.T) {
@@ -394,10 +391,7 @@ func TestRunKeepsDestinationOperationsConfinedWhenParentChanges(t *testing.T) {
 	if contents, err := os.ReadFile(filepath.Join(destination, "continued.txt")); err != nil || string(contents) != "continued" {
 		t.Fatalf("safe candidate was not copied: contents=%q err=%v", contents, err)
 	}
-	if !strings.Contains(logs.String(), "event=copy_failed") ||
-		!strings.Contains(logs.String(), "event=progress completed=2 failed=1 succeeded=1 total=2") {
-		t.Fatalf("parent swap did not fail and continue:\n%s", logs.String())
-	}
+	requireCopyFailureRecord(t, logs.String())
 }
 
 func TestRunSkipsCaseConflictGroupsDuringCopy(t *testing.T) {
@@ -424,13 +418,13 @@ func TestRunSkipsCaseConflictGroupsDuringCopy(t *testing.T) {
 	if contents, err := os.ReadFile(filepath.Join(destination, "other.txt")); err != nil || string(contents) != "copied" {
 		t.Fatalf("non-conflicting candidate was not copied: contents=%q err=%v", contents, err)
 	}
-	if got := strings.Count(logs.String(), "event=case_conflicts_skipped"); got != 1 {
+	if got := strings.Count(logs.String(), "WARN, case_conflicts_skipped"); got != 1 {
 		t.Fatalf("case-conflict warnings = %d, want one:\n%s", got, logs.String())
 	}
-	if !strings.Contains(logs.String(), "event=case_conflicts_skipped files=5 groups=2") {
+	if !strings.Contains(logs.String(), "WARN, case_conflicts_skipped files=5 groups=2") {
 		t.Fatalf("case-conflict warning counts = %s", logs.String())
 	}
-	if strings.Index(logs.String(), "event=case_conflicts_skipped") < strings.LastIndex(logs.String(), "event=progress") {
+	if strings.Index(logs.String(), "WARN, case_conflicts_skipped") < strings.LastIndex(logs.String(), "INFO, copied ") {
 		t.Fatalf("case-conflict warning was emitted before processing completed:\n%s", logs.String())
 	}
 }
@@ -507,10 +501,7 @@ func TestRunCleansPartialDestinationAfterInjectedFailures(t *testing.T) {
 			if contents, err := os.ReadFile(filepath.Join(destination, "continued.txt")); err != nil || string(contents) != "continued" {
 				t.Fatalf("continued candidate was not copied: contents=%q err=%v", contents, err)
 			}
-			if !strings.Contains(logs.String(), "event=copy_failed") ||
-				!strings.Contains(logs.String(), "event=progress completed=2 failed=1 succeeded=1 total=2") {
-				t.Fatalf("failure did not clean up and continue:\n%s", logs.String())
-			}
+			requireCopyFailureRecord(t, logs.String())
 		})
 	}
 }
@@ -522,7 +513,7 @@ func failedPathFor(failure, sourcePath, destinationPath string) string {
 	return filepath.Base(destinationPath)
 }
 
-func TestRunEmitsProgressForEveryCopyCandidate(t *testing.T) {
+func TestRunEmitsCopyOutcomeProgressForEveryCopyCandidate(t *testing.T) {
 	source := t.TempDir()
 	destination := t.TempDir()
 	writeFile(t, filepath.Join(source, "missing.txt"), "missing", 0o600)
@@ -535,11 +526,14 @@ func TestRunEmitsProgressForEveryCopyCandidate(t *testing.T) {
 	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(logs.String(), "event=progress"); got != 2 {
-		t.Fatalf("progress records = %d, want 2:\n%s", got, logs.String())
+	if got := strings.Count(logs.String(), "INFO, copied "); got != 2 {
+		t.Fatalf("copied records = %d, want 2:\n%s", got, logs.String())
 	}
-	if !strings.Contains(logs.String(), "event=progress completed=2 failed=0 succeeded=2 total=2") {
-		t.Fatalf("final progress missing counters:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "INFO, copied path=source-larger.txt [ completed=2 failed=0 succeeded=2 total=2 ]") {
+		t.Fatalf("final copied record missing progress:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "progress") {
+		t.Fatalf("standalone progress record emitted:\n%s", logs.String())
 	}
 }
 
@@ -557,8 +551,22 @@ func testLogger(out *bytes.Buffer) logx.Logger {
 	return logx.Logger{
 		Out: out,
 		Err: out,
-		Now: func() time.Time {
-			return time.Date(2026, 7, 25, 6, 12, 4, 0, time.UTC)
-		},
+	}
+}
+
+func requireCopyFailureRecord(t *testing.T, logs string) {
+	t.Helper()
+	const progress = "[ completed=2 failed=1 succeeded=1 total=2 ]"
+	count := 0
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.HasPrefix(line, "WARN, copy_failed ") {
+			count++
+			if !strings.Contains(line, progress) {
+				t.Fatalf("copy failure record missing progress: %q\n%s", line, logs)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("copy failure records = %d, want 1:\n%s", count, logs)
 	}
 }

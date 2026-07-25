@@ -33,25 +33,24 @@ sudo mv compress-vedio  /usr/local/bin/
 ```
 
 ```text
-compress-vedio --dir/-d <directory> [--execute/-x] [--yes/-y] [--ff-option/-f "<ffmpeg options>"]
+compress-vedio --dir/-d <directory> [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
 ```
 
 | 选项 | 说明 |
 | --- | --- |
 | `--dir`, `-d` | 必填，递归扫描的目录。 |
-| `--execute`, `-x` | 执行压缩；省略时仅预览，不修改文件或调用 ffmpeg。 |
-| `--yes`, `-y` | 仅限执行模式；跳过每个文件的确认提示。 |
+| `--execute`, `-x` | 直接压缩所有发现的文件；省略时仅预览，不修改文件或调用 ffmpeg。 |
 | `--ff-option`, `-f` | 传给 ffmpeg 的编码选项字符串。默认值为 `-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k`。 |
 | `--help`, `-h` | 显示帮助。 |
 
-`--yes` 必须和 `--execute` 一起使用。`--ff-option` 支持引号和反斜杠转义，且不会经由 shell 执行。
+`--execute/-x` 直接压缩所有发现的文件。`--ff-option` 支持引号和反斜杠转义，且不会经由 shell 执行。
 
 ```bash
 # 仅仅预览要压缩哪些文件，不会真的执行
 compress-vedio --dir /Volumes/Data/Videos
 
 # 实施压缩
-compress-vedio --dir /Volumes/Data/Videos -x 
+compress-vedio --dir /Volumes/Data/Videos --execute
 ```
 
 
@@ -88,4 +87,3 @@ check-copy --source/-s <directory> --destination/-d <directory> [--copy/-c]
 ```bash
 check-copy -s /Volumes/red/1 -d /Volumes/black/1 -c
 ```
-

@@ -3,25 +3,38 @@ package logx
 import (
 	"bytes"
 	"testing"
-	"time"
 )
 
-func TestLoggerInfoUsesSortedFieldsAndUTC(t *testing.T) {
+func TestLoggerInfoUsesSortedFields(t *testing.T) {
 	var out, err bytes.Buffer
 	logger := Logger{
 		Out: &out, Err: &err,
-		Now: func() time.Time {
-			return time.Date(2026, 7, 25, 6, 12, 4, 0, time.FixedZone("PDT", -7*3600))
-		},
 	}
 
-	logger.Info("progress", Field{Key: "total", Value: "10"}, Field{Key: "completed", Value: "3"})
+	logger.Info("missing", Field{Key: "path", Value: "1/test1"})
 
-	want := "time=2026-07-25T13:12:04Z level=INFO event=progress completed=3 total=10\n"
-	if got := out.String(); got != want {
-		t.Fatalf("Info() = %q, want %q", got, want)
+	if got := out.String(); got != "INFO, missing path=1/test1\n" {
+		t.Fatalf("Info() = %q", got)
 	}
 	if err.Len() != 0 {
 		t.Fatalf("Info wrote stderr: %q", err.String())
+	}
+}
+
+func TestLoggerErrorProgressUsesSortedFields(t *testing.T) {
+	var out, err bytes.Buffer
+	logger := Logger{Out: &out, Err: &err}
+
+	logger.ErrorProgress(
+		"copy_failed",
+		[]Field{{Key: "path", Value: "1/test2"}, {Key: "error", Value: "write failed"}},
+		[]Field{{Key: "total", Value: "2"}, {Key: "failed", Value: "1"}, {Key: "completed", Value: "2"}, {Key: "succeeded", Value: "1"}},
+	)
+
+	if got := err.String(); got != "ERROR, copy_failed error=write failed path=1/test2 [ completed=2 failed=1 succeeded=1 total=2 ]\n" {
+		t.Fatalf("ErrorProgress() = %q", got)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("ErrorProgress wrote stdout: %q", out.String())
 	}
 }
