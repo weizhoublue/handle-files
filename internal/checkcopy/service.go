@@ -136,7 +136,10 @@ func Run(opts Options, logger logx.Logger) error {
 		return err
 	}
 	comparison := Compare(source, destination)
+
+	fmt.Println("")
 	logComparison(logger, comparison)
+	fmt.Println("")
 
 	candidates := append(append([]string{}, comparison.Missing...), comparison.SourceLarger...)
 	sort.Strings(candidates)
@@ -199,6 +202,8 @@ func Run(opts Options, logger logx.Logger) error {
 			)
 		}
 	}
+
+	fmt.Println("")
 	logScanSummary(logger, source, destination)
 	logDifferenceSummary(logger, source, comparison, succeeded, failed, true)
 	logCaseConflicts(logger, comparison.CaseConflicts, "case_conflicts_skipped")
