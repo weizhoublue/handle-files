@@ -21,6 +21,7 @@ make build-macos
 - `*_output.mp4` 会跳过；失败时保留原文件并清理不完整输出。
 - 执行压缩时会直接显示 FFmpeg 原始 stdout/stderr。
 - 未加 `--execute/-x` 时仅预览输入/输出路径，不写入文件。
+- 启动时会输出 `run config:`，包含 `source_dir`、`output_dir`、`execute_copy`、`remove_original` 和 `ffmpeg_args`。
 
 安装：
 ```bash
