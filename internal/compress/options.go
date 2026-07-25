@@ -127,7 +127,7 @@ Options:
 	compress-vedio -s /Volumes/Data/Videos
 
 	# 实施压缩, 并且压缩后的文件 位于 原目录, 且删除原来的老文件
-	compress-vedio -s /Volumes/Data/Videos -d /Volumes/Data/Archive -x 
+	compress-vedio -s /Volumes/Data/Videos -x 
 
 	# 实施压缩, 压缩后的文件 位于 新目录，且不删除原来的老文件
 	compress-vedio -s /Volumes/Data/Videos -d /Volumes/Data/Archive -r false -x 
