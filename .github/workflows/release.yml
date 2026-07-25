@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test ./... -count=1
+
+      - name: Build macOS binaries
+        run: make build-macos
+
+      - name: Stage release assets
+        run: |
+          mkdir -p dist/release
+          cp dist/macos-arm64/compress-vedio dist/release/compress-vedio-macos-arm64
+          cp dist/macos-arm64/check-copy dist/release/check-copy-macos-arm64
+          cp dist/macos-amd64/compress-vedio dist/release/compress-vedio-macos-amd64
+          cp dist/macos-amd64/check-copy dist/release/check-copy-macos-amd64
+          test -x dist/release/compress-vedio-macos-arm64
+          test -x dist/release/check-copy-macos-arm64
+          test -x dist/release/compress-vedio-macos-amd64
+          test -x dist/release/check-copy-macos-amd64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/release/compress-vedio-macos-arm64
+            dist/release/check-copy-macos-arm64
+            dist/release/compress-vedio-macos-amd64
+            dist/release/check-copy-macos-amd64
+          generate_release_notes: true
+
+      - name: Create release branch
+        run: |
+          tag_name=${GITHUB_REF#refs/tags/}
+          branch=release/${tag_name}
+          git switch -c "$branch"
+          git push origin "$branch"
