@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,58 @@ func TestRunChecksFFmpegBeforeCompressingAndDeletesSourceAfterSuccess(t *testing
 	}
 	if !strings.Contains(logs.String(), "completed=1 failed=0 skipped=0 succeeded=1 total=1") {
 		t.Fatalf("final progress missing counters:\n%s", logs.String())
+	}
+}
+
+func TestRunReportsSizeReductionForSuccessfulCompression(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		output         string
+		wantReduction  string
+		wantPercentage string
+	}{
+		{name: "smaller output", input: "original", output: "out", wantReduction: "5", wantPercentage: "62.50"},
+		{name: "empty input", input: "", output: "", wantReduction: "0", wantPercentage: "0.00"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, "clip.mp4")
+			output := filepath.Join(root, "clip_output.mp4")
+			mustWrite(t, source, tt.input)
+			runner := &fakeRunner{
+				path: "/fake/ffmpeg",
+				run: func(_ string, args ...string) error {
+					if len(args) != 1 || args[0] != "-version" {
+						mustWrite(t, args[len(args)-1], tt.output)
+					}
+					return nil
+				},
+			}
+			var logs bytes.Buffer
+
+			summary, err := Run(
+				context.Background(),
+				Options{Directory: root, Execute: true, Yes: true, FFArgs: []string{"-c:v", "libx264"}},
+				runner,
+				strings.NewReader(""),
+				testLogger(&logs),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := (Summary{Total: 1, Succeeded: 1}); summary != want {
+				t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+			}
+			wantLog := "event=compressed input=" + source + " original_bytes=" + strconv.Itoa(len(tt.input)) +
+				" output=" + output + " output_bytes=" + strconv.Itoa(len(tt.output)) +
+				" reduction_bytes=" + tt.wantReduction + " reduction_percent=" + tt.wantPercentage
+			if !strings.Contains(logs.String(), wantLog) {
+				t.Fatalf("size reduction log missing:\n%s", logs.String())
+			}
+		})
 	}
 }
 

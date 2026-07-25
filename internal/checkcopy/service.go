@@ -143,6 +143,9 @@ func Run(opts Options, logger logx.Logger) error {
 		if len(candidates) > 0 {
 			logger.Info("copy_skipped", logx.Field{Key: "total", Value: strconv.Itoa(len(candidates))})
 		}
+		logScanSummary(logger, source, destination)
+		logDifferenceSummary(logger, source, comparison, 0, 0, false)
+		logCaseConflicts(logger, comparison.CaseConflicts, "case_conflicts_reported")
 		return nil
 	}
 
@@ -180,13 +183,9 @@ func Run(opts Options, logger logx.Logger) error {
 			logx.Field{Key: "failed", Value: strconv.Itoa(failed)},
 		)
 	}
-	if len(comparison.CaseConflicts) > 0 {
-		logger.Warn("case_conflicts_skipped",
-			logx.Field{Key: "files", Value: strconv.Itoa(len(conflictedPaths))},
-			logx.Field{Key: "groups", Value: strconv.Itoa(len(comparison.CaseConflicts))},
-			logx.Field{Key: "paths", Value: strings.Join(conflictedPathsInOrder(comparison.CaseConflicts), ",")},
-		)
-	}
+	logScanSummary(logger, source, destination)
+	logDifferenceSummary(logger, source, comparison, succeeded, failed, true)
+	logCaseConflicts(logger, comparison.CaseConflicts, "case_conflicts_skipped")
 	return nil
 }
 
@@ -309,6 +308,43 @@ func logComparison(logger logx.Logger, comparison Comparison) {
 	for _, path := range comparison.DestLarger {
 		logger.Info("destination_larger", logx.Field{Key: "path", Value: path})
 	}
+}
+
+func logScanSummary(logger logx.Logger, source, destination map[string]Entry) {
+	logger.Info("scan_summary",
+		logx.Field{Key: "source_files", Value: strconv.Itoa(len(source))},
+		logx.Field{Key: "destination_files", Value: strconv.Itoa(len(destination))},
+	)
+}
+
+func logDifferenceSummary(logger logx.Logger, source map[string]Entry, comparison Comparison, copied, failed int, copiedFiles bool) {
+	consistent := len(source) - len(comparison.Missing) - len(comparison.SourceLarger) - len(comparison.DestLarger)
+	fields := []logx.Field{
+		{Key: "missing", Value: strconv.Itoa(len(comparison.Missing))},
+		{Key: "extra", Value: strconv.Itoa(len(comparison.Extra))},
+		{Key: "source_larger", Value: strconv.Itoa(len(comparison.SourceLarger))},
+		{Key: "destination_larger", Value: strconv.Itoa(len(comparison.DestLarger))},
+		{Key: "consistent", Value: strconv.Itoa(consistent)},
+	}
+	if copiedFiles {
+		fields = append(fields,
+			logx.Field{Key: "copied", Value: strconv.Itoa(copied)},
+			logx.Field{Key: "failed", Value: strconv.Itoa(failed)},
+		)
+	}
+	logger.Info("difference_summary", fields...)
+}
+
+func logCaseConflicts(logger logx.Logger, conflicts [][]string, event string) {
+	if len(conflicts) == 0 {
+		return
+	}
+	paths := conflictedPathsInOrder(conflicts)
+	logger.Warn(event,
+		logx.Field{Key: "files", Value: strconv.Itoa(len(paths))},
+		logx.Field{Key: "groups", Value: strconv.Itoa(len(conflicts))},
+		logx.Field{Key: "paths", Value: strings.Join(paths, ",")},
+	)
 }
 
 func usableLogger(logger logx.Logger) logx.Logger {

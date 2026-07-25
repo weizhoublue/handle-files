@@ -200,6 +200,62 @@ func TestRunReportOnlyDoesNotWriteCopyCandidates(t *testing.T) {
 	}
 }
 
+func TestRunReportOnlyReportsCaseConflictsAfterComparison(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	writeFile(t, filepath.Join(source, "A.txt"), "first", 0o600)
+	writeFile(t, filepath.Join(source, "a.txt"), "second", 0o600)
+	var logs bytes.Buffer
+
+	if err := Run(Options{Source: source, Destination: destination}, testLogger(&logs)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "A.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("report-only case conflict wrote destination: %v", err)
+	}
+	if got := strings.Count(logs.String(), "event=case_conflicts_reported"); got != 1 {
+		t.Fatalf("case-conflict warnings = %d, want one:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "event=case_conflicts_reported files=2 groups=1 paths=A.txt,a.txt") {
+		t.Fatalf("case-conflict warning fields = %s", logs.String())
+	}
+	if !strings.HasSuffix(logs.String(), "event=case_conflicts_reported files=2 groups=1 paths=A.txt,a.txt\n") {
+		t.Fatalf("case-conflict warning was not final:\n%s", logs.String())
+	}
+}
+
+func TestRunEmitsScanAndDifferenceSummaries(t *testing.T) {
+	for _, copyMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "report-only", true: "copy"}[copyMode], func(t *testing.T) {
+			source := t.TempDir()
+			destination := t.TempDir()
+			writeFile(t, filepath.Join(source, "missing.txt"), "missing", 0o600)
+			writeFile(t, filepath.Join(source, "source-larger.txt"), "source is larger", 0o600)
+			writeFile(t, filepath.Join(source, "destination-larger.txt"), "dst", 0o600)
+			writeFile(t, filepath.Join(source, "same.txt"), "same", 0o600)
+			writeFile(t, filepath.Join(destination, "source-larger.txt"), "dst", 0o600)
+			writeFile(t, filepath.Join(destination, "destination-larger.txt"), "destination is larger", 0o600)
+			writeFile(t, filepath.Join(destination, "same.txt"), "same", 0o600)
+			writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
+			var logs bytes.Buffer
+
+			if err := Run(Options{Source: source, Destination: destination, Copy: copyMode}, testLogger(&logs)); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), "event=scan_summary destination_files=4 source_files=4") {
+				t.Fatalf("scan summary = %s", logs.String())
+			}
+			differenceSummary := "event=difference_summary consistent=1 destination_larger=1 extra=1 missing=1 source_larger=1"
+			if copyMode {
+				differenceSummary = "event=difference_summary consistent=1 copied=2 destination_larger=1 extra=1 failed=0 missing=1 source_larger=1"
+			}
+			if !strings.Contains(logs.String(), differenceSummary) {
+				t.Fatalf("difference summary = %s", logs.String())
+			}
+		})
+	}
+}
+
 func TestRunValidatesNormalizedDirectories(t *testing.T) {
 	source := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "source-alias")

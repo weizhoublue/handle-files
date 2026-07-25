@@ -133,6 +133,29 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reade
 			logProgress(logger, summary)
 			continue
 		}
+		sourceInfo, err := os.Stat(path)
+		if err != nil {
+			summary.Failed++
+			logger.Error("source_size_failed",
+				logx.Field{Key: "error", Value: err.Error()},
+				logx.Field{Key: "path", Value: path},
+			)
+			logProgress(logger, summary)
+			continue
+		}
+		reductionBytes := sourceInfo.Size() - info.Size()
+		reductionPercent := 0.0
+		if sourceInfo.Size() != 0 {
+			reductionPercent = float64(reductionBytes) / float64(sourceInfo.Size()) * 100
+		}
+		logger.Info("compressed",
+			logx.Field{Key: "input", Value: path},
+			logx.Field{Key: "output", Value: output},
+			logx.Field{Key: "original_bytes", Value: strconv.FormatInt(sourceInfo.Size(), 10)},
+			logx.Field{Key: "output_bytes", Value: strconv.FormatInt(info.Size(), 10)},
+			logx.Field{Key: "reduction_bytes", Value: strconv.FormatInt(reductionBytes, 10)},
+			logx.Field{Key: "reduction_percent", Value: fmt.Sprintf("%.2f", reductionPercent)},
+		)
 		if err := os.Remove(path); err != nil {
 			summary.Failed++
 			logger.Error("source_delete_failed",
@@ -144,10 +167,6 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, input io.Reade
 		}
 
 		summary.Succeeded++
-		logger.Info("compressed",
-			logx.Field{Key: "input", Value: path},
-			logx.Field{Key: "output", Value: output},
-		)
 		logProgress(logger, summary)
 	}
 	if err := confirmations.Err(); err != nil {
