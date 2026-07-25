@@ -92,8 +92,8 @@ Per-file failures are counted and shown in the summary but do not stop the batch
 3. Detect source paths that collide after case folding and report each conflict group.
 4. Compare maps to identify source-only files, destination-only files, and same-path size mismatches.
 5. Split mismatches into source-larger and destination-larger groups, then print all groups in sorted-path order.
-6. With `--copy`, copy source-only and source-larger files only. Create needed parent directories and preserve source permissions and modification time.
-7. After every copy attempt, emit its overall progress: completed count, total copy candidates, and success and failure counts.
+6. With `--copy`, copy source-only and source-larger files only. For every source path in a case-conflict group, skip copying it; non-conflicting candidates continue. After all processing, emit one structured warning with the skipped conflict group and file counts. Create needed parent directories and preserve source permissions and modification time for copied files.
+7. After every non-conflicting copy attempt, emit its overall progress: completed count, total copy candidates, and success and failure counts.
 8. On a copy failure, warn, remove any partial destination file, count the failure, and continue.
 9. Print the same scan and difference summary categories as the Python script.
 
@@ -113,7 +113,7 @@ Unit tests will use temporary directories and injected process execution:
 - ffmpeg option parsing accepts quoted and escaped values and rejects malformed input.
 - Compression command construction and success/failure cleanup work without a real ffmpeg binary.
 - Directory comparisons classify missing, extra, source-larger, and destination-larger files correctly.
-- Case-conflict detection reports colliding paths.
+- In copy mode, every path in a case-conflict group is skipped while non-conflicting copies continue, followed by one structured warning with skipped group and file counts.
 - Copying creates parent directories and preserves permissions and modification time.
 - Flag parsing rejects positional arguments, empty required values, invalid flag combinations, and invalid path values.
 - ffmpeg dependency checks distinguish executable absence, launch failure, and nonzero version checks.

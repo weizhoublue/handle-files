@@ -1,120 +1,74 @@
 # 文件处理
 
+Go 二进制是主入口；`compress_mp4.py` 和 `sync_check.py` 保留为行为参考，不作为推荐运行方式。
 
-## compress_mp4.py   对运动相机的 mp4 文件进行压缩
+## 构建 macOS 二进制
 
-批量压缩指定目录下所有层级的 MP4 文件，使用 ffmpeg 进行有损压缩（H.264 + AAC），压缩后自动删除原文件。
-
-### 依赖
-
-- Python 3.7+
-- [ffmpeg](https://ffmpeg.org/) （需在 PATH 中可用）
+需要 Go（版本见 `go.mod`）。以下命令构建 Apple Silicon 和 Intel 的四个二进制文件：
 
 ```bash
-# macOS
+make build-macos
+```
+
+输出位于 `dist/macos-arm64/` 和 `dist/macos-amd64/`，按 Mac 架构选择对应目录。
+
+## compress-vedio
+
+递归处理 MP4 文件。启动时同时使用可执行文件查找验证 `ffmpeg`，并运行 `ffmpeg -version`；任一检查失败都会终止。macOS 可通过 Homebrew 安装：
+
+```bash
 brew install ffmpeg
 ```
 
-### 用法
+```text
+compress-vedio --dir/-d <directory> [--execute/-x] [--yes/-y] [--ff-option/-f "<ffmpeg options>"]
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--dir`, `-d` | 必填，递归扫描的目录。 |
+| `--execute`, `-x` | 执行压缩；省略时仅预览，不修改文件或调用 ffmpeg。 |
+| `--yes`, `-y` | 仅限执行模式；跳过每个文件的确认提示。 |
+| `--ff-option`, `-f` | 传给 ffmpeg 的编码选项字符串。默认值为 `-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k`。 |
+| `--help`, `-h` | 显示帮助。 |
+
+`--yes` 必须和 `--execute` 一起使用。`--ff-option` 支持引号和反斜杠转义，且不会经由 shell 执行。
 
 ```bash
-python3 compress_mp4.py <目录> [dry_run] [confirm]
+# 预览
+dist/macos-arm64/compress-vedio --dir /Volumes/Data/Videos
+
+# 无人值守执行
+dist/macos-arm64/compress-vedio --dir /Volumes/Data/Videos --execute --yes
 ```
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `目录` | 要处理的根目录（递归扫描所有子目录） | 必填 |
-| `dry_run` | `true` 只展示将要处理的文件，不执行压缩；`false` 真正执行 | `true` |
-| `confirm` | `true` 每个文件执行前提示 y/n 确认；`false` 无人值守批量处理 | `true` |
+输出为原文件名加 `_output` 后缀。成功后删除原文件；`*_output.mp4` 会跳过；失败时保留原文件并清理不完整输出。
 
-### 按照此命令执行
+## check-copy
+
+按相对路径和文件大小递归比较目录。`--copy` 会复制源端独有文件，并以源文件覆盖同路径但更小的目标文件；目标端独有文件和更大文件仅报告，不删除。
+
+```text
+check-copy --source/-s <directory> --destination/-d <directory> [--copy/-c]
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--source`, `-s` | 必填，基准源目录。 |
+| `--destination`, `-d` | 必填，待比较或复制的目标目录。 |
+| `--copy`, `-c` | 执行复制；省略时仅报告差异。 |
+| `--help`, `-h` | 显示帮助。 |
 
 ```bash
-# 预览将要处理的文件（不做任何修改）
-python3 compress_mp4.py /Volumes/Data/Videos
-
-# 逐文件确认后压缩（默认开启确认）
-python3 compress_mp4.py /Volumes/Data/Videos false
-
-# 无人值守批量压缩，不逐文件询问
-python3 compress_mp4.py /Volumes/Data/Videos false false
+dist/macos-arm64/check-copy --source /Volumes/red/1 --destination /Volumes/black/1 --copy
 ```
 
-### 压缩参数
+源目录中仅大小写不同的路径属于大小写冲突组。在复制模式中，冲突组内每个源路径都会跳过，其他非冲突复制继续。全部处理完成后，程序会发出一条结构化警告，报告跳过的冲突组数和文件数。
 
-```
-ffmpeg -i input.mp4 -c:v libx264 -crf 23 -preset slow -c:a aac -b:a 192k input_output.mp4
-```
+## 输出
 
-| 参数 | 说明 |
-|------|------|
-| `-c:v libx264` | 视频编码器：H.264 |
-| `-crf 23` | 画质系数（0=无损，51=最差），23 为默认平衡值 |
-| `-preset slow` | 编码速度越慢，压缩率越高 |
-| `-c:a aac` | 音频编码器：AAC |
-| `-b:a 192k` | 音频码率 192 kbps |
+两个命令都向控制台输出结构化日志和每文件进度；不创建日志文件。信息和进度记录写入标准输出，验证失败和警告写入标准错误。
 
-### 输出规则
+## Python 行为参考
 
-- 压缩结果保存为 `<原文件名>_output.mp4`，与原文件同目录
-- 压缩成功后原文件被删除
-- 文件名已含 `_output` 后缀的文件会被自动跳过（幂等，可重复运行）
-- ffmpeg 压缩失败时，不删除原文件，并清理不完整的输出文件
-
-### 重入安全
-
-脚本可重复运行：已压缩的 `*_output.mp4` 文件不会被再次处理，中途中断后重新运行会继续处理未完成的文件。
-
-
----
-
-## sync_check.py   比较两个目录的文件差异并可选择性同步
-
-递归比较源目录和目标目录下所有层级的文件，以**文件大小**为判断依据，识别三类差异，并可将需要补齐的文件从源目录复制到目标目录。
-
-### 依赖
-
-- Python 3.7+（无其他外部依赖）
-
-### 用法
-
-```bash
-python3 sync_check.py <源目录> <目标目录> [copy]
-```
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `源目录` | 基准目录（递归扫描所有子目录） | 必填 |
-| `目标目录` | 待对比的目标目录 | 必填 |
-| `copy` | `false` 仅报告差异，不做任何修改；`true` 将需要补齐的文件从源复制到目标 | `false` |
-
-### 按照此命令执行
-
-```bash
-# 仅报告差异（不修改任何文件）
-python3 sync_check.py /Volumes/red/1 /Volumes/black/1
-
-# 报告差异并执行复制
-python3 sync_check.py /Volumes/red/1 /Volumes/black/1 true
-```
-
-### 差异类型说明
-
-| 标签 | 含义 | copy=true 时的处理 |
-|------|------|-------------------|
-| `[MISS]` | 源有、目标无 | 复制到目标 |
-| `[DIFF]` src 更大 | 两边都有，但源文件更大 | 用源文件覆盖目标 |
-| `[DIFF]` dst 更大 | 两边都有，但目标文件更大 | 跳过（目标可能更完整） |
-| `[EXTRA]` | 目标有、源无 | 仅报告，不删除 |
-
-### 大小写冲突警告
-
-若源目录中存在仅大小写不同的同名文件（如 `IMG_5031.MOV` 与 `IMG_5031.mov`），脚本会在扫描后立即警告：
-
-```
-[WARN] Source has 2 case conflict(s) — these files differ only in
-       case and cannot both exist on a case-insensitive destination filesystem:
-  [WARN]   '/Volumes/red/1/IMG_5031.MOV' (50,073,416 B)  vs  '/Volumes/red/1/IMG_5031.mov' (10,574,727 B)
-```
-
-这种情况发生在源卷为大小写敏感（如 exFAT、Linux 格式）而目标卷为大小写不敏感（如 macOS 默认 HFS+/APFS）时，无法将两个文件同时完整复制到目标卷。
+`compress_mp4.py` 和 `sync_check.py` 保留以便核对旧行为。使用 Go 二进制进行新的处理工作；Python 脚本不在此 README 的运行接口范围内。

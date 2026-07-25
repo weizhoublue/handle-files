@@ -1,0 +1,33 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    name: ${{ matrix.runner }} / ${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            goarch: amd64
+          - runner: macos-14
+            goarch: arm64
+    env:
+      GOOS: darwin
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./... -count=1
+      - run: make build-macos
+      - run: |
+          test -x dist/macos-arm64/compress-vedio
+          test -x dist/macos-arm64/check-copy
+          test -x dist/macos-amd64/compress-vedio
+          test -x dist/macos-amd64/check-copy

@@ -385,7 +385,7 @@ func TestCompareClassifiesEveryDifference(t *testing.T) {
 }
 ```
 
-Add tests for option rejection of positional, empty, file, and equal resolved directories; case-folding conflict groups; report-only mode not writing; copy mode creating nested parents; copied mode and modification time; failed copy cleanup; and one progress record per copy candidate.
+Add tests for option rejection of positional, empty, file, and equal resolved directories; case-folding conflict groups; report-only mode not writing; copy mode creating nested parents; copied mode and modification time; failed copy cleanup; and one progress record per non-conflicting copy candidate. In copy mode, verify every source path in a case-conflict group is skipped, non-conflicting work continues, and one structured warning after all processing reports skipped conflict group and file counts.
 
 - [ ] **Step 2: Run check-copy tests to verify they fail**
 
@@ -397,7 +397,7 @@ Expected: FAIL because package `internal/checkcopy` does not exist.
 
 Parse `--source/-s`, `--destination/-d`, and `--copy/-c` with the same `flag.ContinueOnError` rules as Task 2. Validate each path via `filepath.Abs`, `filepath.EvalSymlinks`, and `os.Stat`.
 
-Implement scanning with `filepath.WalkDir`, `DirEntry.Info`, `filepath.Rel`, and `filepath.ToSlash`. Warn and continue for per-file information failures. Sort every result slice. Group case conflicts by `strings.ToLower(relativePath)`. In copy mode, copy only `Missing` and `SourceLarger` entries with `os.MkdirAll`, `os.Open`, `os.OpenFile`, `io.Copy`, `os.Chmod`, and `os.Chtimes`. Remove a destination partial file after a write or metadata failure. Emit `event=progress completed=<n> total=<n> succeeded=<n> failed=<n>` after each attempt.
+Implement scanning with `filepath.WalkDir`, `DirEntry.Info`, `filepath.Rel`, and `filepath.ToSlash`. Warn and continue for per-file information failures. Sort every result slice. Group case conflicts by `strings.ToLower(relativePath)`. In copy mode, skip every source path in a case-conflict group, continue with non-conflicting `Missing` and `SourceLarger` entries using `os.MkdirAll`, `os.Open`, `os.OpenFile`, `io.Copy`, `os.Chmod`, and `os.Chtimes`, then emit one structured warning after all processing with skipped conflict group and file counts. Remove a destination partial file after a write or metadata failure. Emit `event=progress completed=<n> total=<n> succeeded=<n> failed=<n>` after each non-conflicting copy attempt.
 
 - [ ] **Step 4: Run formatter and check-copy tests**
 
