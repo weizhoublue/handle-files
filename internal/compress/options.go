@@ -44,6 +44,12 @@ func ParseOptions(args []string) (Options, error) {
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
 	}
+	ffOptionSet := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "ff-option" || flag.Name == "f" {
+			ffOptionSet = true
+		}
+	})
 	if help {
 		return Options{}, flag.ErrHelp
 	}
@@ -69,7 +75,7 @@ func ParseOptions(args []string) (Options, error) {
 		return Options{}, fmt.Errorf("path %q is not a directory", absoluteDirectory)
 	}
 
-	if ffOption == "" {
+	if !ffOptionSet {
 		ffOption = DefaultFFOptions
 	}
 	ffArgs, err := ParseFFOptions(ffOption)

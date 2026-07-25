@@ -20,6 +20,17 @@ func TestParseFFOptionsHonorsQuotesAndEscapes(t *testing.T) {
 	}
 }
 
+func TestParseFFOptionsHandlesQuotedAndEscapedEdgeCombinations(t *testing.T) {
+	got, err := ParseFFOptions(`prefix"two words"'!' path='C:\clips\input file.mp4'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"prefixtwo words!", "path=C:clipsinput file.mp4"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ParseFFOptions() = %#v, want %#v", got, want)
+	}
+}
+
 func TestParseFFOptionsRejectsMalformedValues(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -97,6 +108,31 @@ func TestParseOptionsAcceptsShortFlagsAndExplicitValues(t *testing.T) {
 	if got.Directory != want.Directory || got.Execute != want.Execute || got.Yes != want.Yes ||
 		!slices.Equal(got.FFArgs, want.FFArgs) {
 		t.Fatalf("ParseOptions() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseOptionsAcceptsLongFlagsAndQuotedEscapedFFOptions(t *testing.T) {
+	dir := t.TempDir()
+	got, err := ParseOptions([]string{
+		"--dir", dir,
+		"--execute",
+		"--yes",
+		"--ff-option", `-metadata title="A clip" -vf scale=1280\:720`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-metadata", "title=A clip", "-vf", "scale=1280:720"}
+	if !slices.Equal(got.FFArgs, want) {
+		t.Fatalf("ParseOptions() FFArgs = %#v, want %#v", got.FFArgs, want)
+	}
+}
+
+func TestParseOptionsRejectsExplicitEmptyFFOption(t *testing.T) {
+	_, err := ParseOptions([]string{"--dir", t.TempDir(), "--ff-option", ""})
+	if err == nil || !strings.Contains(err.Error(), "invalid --ff-option") ||
+		!strings.Contains(err.Error(), "empty ffmpeg option") {
+		t.Fatalf("ParseOptions() error = %v, want explicit empty ff-option rejection", err)
 	}
 }
 
