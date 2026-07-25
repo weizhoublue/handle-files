@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,10 +21,11 @@ type runnerCall struct {
 }
 
 type fakeRunner struct {
-	path        string
-	lookPathErr error
-	run         func(name string, args ...string) error
-	calls       []runnerCall
+	path          string
+	lookPathErr   error
+	run           func(name string, args ...string) error
+	runWithOutput func(stdout, stderr io.Writer, name string, args ...string) error
+	calls         []runnerCall
 }
 
 func (r *fakeRunner) LookPath(string) (string, error) {
@@ -35,6 +37,17 @@ func (r *fakeRunner) LookPath(string) (string, error) {
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) error {
 	r.calls = append(r.calls, runnerCall{name: name, args: append([]string(nil), args...)})
+	if r.run != nil {
+		return r.run(name, args...)
+	}
+	return nil
+}
+
+func (r *fakeRunner) RunWithOutput(_ context.Context, stdout, stderr io.Writer, name string, args ...string) error {
+	r.calls = append(r.calls, runnerCall{name: name, args: append([]string(nil), args...)})
+	if r.runWithOutput != nil {
+		return r.runWithOutput(stdout, stderr, name, args...)
+	}
 	if r.run != nil {
 		return r.run(name, args...)
 	}
@@ -81,7 +94,7 @@ func TestRunChecksFFmpegBeforeCompressingAndDeletesSourceAfterSuccess(t *testing
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Source: root, Remove: true, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
 		testLogger(&logs),
 	)
@@ -110,6 +123,228 @@ func TestRunChecksFFmpegBeforeCompressingAndDeletesSourceAfterSuccess(t *testing
 	if !strings.Contains(logs.String(), "INFO, compressed ") ||
 		!strings.Contains(logs.String(), "[ completed=1 failed=0 skipped=0 succeeded=1 total=1 ]") {
 		t.Fatalf("compression progress missing counters:\n%s", logs.String())
+	}
+}
+
+func TestRunDestinationMapsOutputAndRemovesSourceByDefault(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "source")
+	destinationRoot := filepath.Join(root, "destination")
+	input := filepath.Join(sourceRoot, "nested", "clip.mp4")
+	output := filepath.Join(destinationRoot, "nested", "clip_output.mp4")
+	mustWrite(t, input, "video")
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{
+		path: "/fake/ffmpeg",
+		runWithOutput: func(stdout, stderr io.Writer, _ string, args ...string) error {
+			mustWrite(t, args[len(args)-1], "compressed")
+			return nil
+		},
+	}
+
+	summary, err := Run(
+		context.Background(),
+		Options{Source: sourceRoot, Destination: destinationRoot, Remove: true, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		runner,
+		testLogger(&bytes.Buffer{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Summary{Total: 1, Succeeded: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	if got := runner.calls[len(runner.calls)-1].args[len(runner.calls[len(runner.calls)-1].args)-1]; got != output {
+		t.Fatalf("output arg = %q, want %q", got, output)
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("output stat error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(output)); err != nil {
+		t.Fatalf("output dir stat error = %v", err)
+	}
+	if _, err := os.Stat(input); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source stat error = %v, want not exist", err)
+	}
+}
+
+func TestRunRemoveFalseRetainsSourceAfterSuccess(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "source")
+	destinationRoot := filepath.Join(root, "destination")
+	input := filepath.Join(sourceRoot, "nested", "clip.mp4")
+	mustWrite(t, input, "video")
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{
+		path: "/fake/ffmpeg",
+		runWithOutput: func(stdout, stderr io.Writer, _ string, args ...string) error {
+			mustWrite(t, args[len(args)-1], "compressed")
+			return nil
+		},
+	}
+
+	summary, err := Run(
+		context.Background(),
+		Options{
+			Source:      sourceRoot,
+			Destination: destinationRoot,
+			Remove:      false,
+			Execute:     true,
+			FFArgs:      []string{"-c:v", "libx264"},
+		},
+		runner,
+		testLogger(&bytes.Buffer{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Summary{Total: 1, Succeeded: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	if _, err := os.Stat(input); err != nil {
+		t.Fatalf("source stat error = %v", err)
+	}
+}
+
+func TestRunConfigLogsSettingsAndStartBeforeCompressed(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "source")
+	destinationRoot := filepath.Join(root, "destination")
+	input := filepath.Join(sourceRoot, "nested", "clip.mp4")
+	output := filepath.Join(destinationRoot, "nested", "clip_output.mp4")
+	mustWrite(t, input, "video")
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{
+		path: "/fake/ffmpeg",
+		runWithOutput: func(stdout, stderr io.Writer, _ string, args ...string) error {
+			mustWrite(t, args[len(args)-1], "compressed")
+			return nil
+		},
+	}
+	var out bytes.Buffer
+
+	summary, err := Run(
+		context.Background(),
+		Options{
+			Source:      sourceRoot,
+			Destination: destinationRoot,
+			Remove:      false,
+			Execute:     true,
+			FFArgs:      []string{"-c:v", "libx264", "-preset", "slow"},
+		},
+		runner,
+		testLoggerWithErr(&out, &bytes.Buffer{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Summary{Total: 1, Succeeded: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	logs := out.String()
+	if !strings.Contains(logs, "INFO, run_config ") ||
+		!strings.Contains(logs, "source="+sourceRoot) ||
+		!strings.Contains(logs, "output_root="+destinationRoot) ||
+		!strings.Contains(logs, "execute=true") ||
+		!strings.Contains(logs, "remove=false") ||
+		!strings.Contains(logs, "ffmpeg_args=-c:v libx264 -preset slow") {
+		t.Fatalf("run_config log missing settings:\n%s", logs)
+	}
+	runConfigIndex := strings.Index(logs, "INFO, run_config ")
+	startedIndex := strings.Index(logs, "INFO, compress_started ")
+	compressedIndex := strings.Index(logs, "INFO, compressed input="+input+" ")
+	if runConfigIndex == -1 || startedIndex == -1 || compressedIndex == -1 {
+		t.Fatalf("missing expected log order markers:\n%s", logs)
+	}
+	if !(runConfigIndex < startedIndex && startedIndex < compressedIndex) {
+		t.Fatalf("unexpected log order:\n%s", logs)
+	}
+	if !strings.Contains(logs, "output="+output) {
+		t.Fatalf("compressed log missing mapped output:\n%s", logs)
+	}
+}
+
+func TestRunStreamsChildOutputToLogger(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "clip.mp4")
+	output := filepath.Join(root, "clip_output.mp4")
+	mustWrite(t, source, "video")
+	runner := &fakeRunner{
+		path: "/fake/ffmpeg",
+		runWithOutput: func(stdout, stderr io.Writer, _ string, args ...string) error {
+			_, _ = io.WriteString(stderr, "ffmpeg live output\n")
+			mustWrite(t, args[len(args)-1], "compressed")
+			return nil
+		},
+	}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+
+	summary, err := Run(
+		context.Background(),
+		Options{Source: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		runner,
+		testLoggerWithErr(&out, &errOut),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Summary{Total: 1, Succeeded: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	if got := errOut.String(); got != "ffmpeg live output\n" {
+		t.Fatalf("stderr = %q, want raw ffmpeg output", got)
+	}
+	logs := out.String()
+	if !strings.Contains(logs, "INFO, compressed input="+source+" ") ||
+		!strings.Contains(logs, "output="+output) ||
+		!strings.Contains(logs, "original_bytes=5") ||
+		!strings.Contains(logs, "output_bytes=10") {
+		t.Fatalf("compressed log missing size details:\n%s", logs)
+	}
+}
+
+func TestRunDestinationCleansFailedOutputAndRetainsSource(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "source")
+	destinationRoot := filepath.Join(root, "destination")
+	input := filepath.Join(sourceRoot, "nested", "clip.mp4")
+	output := filepath.Join(destinationRoot, "nested", "clip_output.mp4")
+	mustWrite(t, input, "video")
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{
+		path: "/fake/ffmpeg",
+		runWithOutput: func(stdout, stderr io.Writer, _ string, args ...string) error {
+			mustWrite(t, args[len(args)-1], "partial")
+			return errors.New("encoding failed")
+		},
+	}
+
+	summary, err := Run(
+		context.Background(),
+		Options{Source: sourceRoot, Destination: destinationRoot, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		runner,
+		testLogger(&bytes.Buffer{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Summary{Total: 1, Failed: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	if _, err := os.Stat(input); err != nil {
+		t.Fatalf("source stat error = %v", err)
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output stat error = %v, want not exist", err)
 	}
 }
 
@@ -144,7 +379,7 @@ func TestRunReportsSizeReductionForSuccessfulCompression(t *testing.T) {
 
 			summary, err := Run(
 				context.Background(),
-				Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+				Options{Source: root, Remove: true, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 				runner,
 				testLogger(&logs),
 			)
@@ -183,7 +418,7 @@ func TestRunCleansFailedOutputAndRetainsSource(t *testing.T) {
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Source: root, Remove: true, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
 		testLogger(&logs),
 	)
@@ -216,7 +451,7 @@ func TestRunRetainsSourceWhenCommandProducesNoOutput(t *testing.T) {
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Source: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
 		testLogger(&bytes.Buffer{}),
 	)
@@ -242,7 +477,7 @@ func TestRunRetainsSourceWhenOutputIsNotRegularFile(t *testing.T) {
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Source: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
 		testLogger(&bytes.Buffer{}),
 	)
@@ -259,13 +494,19 @@ func TestRunRetainsSourceWhenOutputIsNotRegularFile(t *testing.T) {
 
 func TestRunPreviewDoesNotInvokeCompression(t *testing.T) {
 	root := t.TempDir()
-	source := filepath.Join(root, "clip.mp4")
-	mustWrite(t, source, "video")
+	sourceRoot := filepath.Join(root, "source")
+	destinationRoot := filepath.Join(root, "destination")
+	input := filepath.Join(sourceRoot, "nested", "clip.mp4")
+	output := filepath.Join(destinationRoot, "nested", "clip_output.mp4")
+	mustWrite(t, input, "video")
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	runner := &fakeRunner{path: "/fake/ffmpeg"}
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Source: sourceRoot, Destination: destinationRoot, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
 		testLogger(&bytes.Buffer{}),
 	)
@@ -278,8 +519,14 @@ func TestRunPreviewDoesNotInvokeCompression(t *testing.T) {
 	if want := []runnerCall{{name: "/fake/ffmpeg", args: []string{"-version"}}}; !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("runner calls = %#v, want %#v", runner.calls, want)
 	}
-	if _, err := os.Stat(source); err != nil {
+	if _, err := os.Stat(input); err != nil {
 		t.Fatalf("source stat error = %v", err)
+	}
+	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preview output stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Dir(output)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preview output dir stat error = %v, want not exist", err)
 	}
 }
 
@@ -302,7 +549,7 @@ func TestRunExecutesEachLiveFileWithoutConfirmation(t *testing.T) {
 
 	summary, err := Run(
 		context.Background(),
-		Options{Directory: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		Options{Source: root, Remove: true, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
 		runner,
 		testLogger(&logs),
 	)
@@ -338,7 +585,7 @@ func TestRunReturnsDependencyErrors(t *testing.T) {
 	t.Run("lookup", func(t *testing.T) {
 		_, err := Run(
 			context.Background(),
-			Options{Directory: t.TempDir()},
+			Options{Source: t.TempDir()},
 			&fakeRunner{lookPathErr: errors.New("not found")},
 			testLogger(&bytes.Buffer{}),
 		)
@@ -359,7 +606,7 @@ func TestRunReturnsDependencyErrors(t *testing.T) {
 		}
 		_, err := Run(
 			context.Background(),
-			Options{Directory: t.TempDir()},
+			Options{Source: t.TempDir()},
 			runner,
 			testLogger(&bytes.Buffer{}),
 		)
@@ -383,8 +630,12 @@ func mustWrite(t *testing.T, path, contents string) {
 }
 
 func testLogger(out *bytes.Buffer) logx.Logger {
+	return testLoggerWithErr(out, out)
+}
+
+func testLoggerWithErr(out, err *bytes.Buffer) logx.Logger {
 	return logx.Logger{
 		Out: out,
-		Err: out,
+		Err: err,
 	}
 }

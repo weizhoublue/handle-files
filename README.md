@@ -13,10 +13,14 @@ make build-macos
 
 ## compress-vedio
 
-递归压缩指定目录在的所有 MP4 文件
+递归压缩指定目录下的所有 MP4 文件
 - 输出新文件名 = 原文件名 + `_output` 后缀。
-- 成功后删除原文件
+- 未指定目标目录时，输出写回原文件所在目录。
+- 指定 `--dest/-d` 时，输出保留源目录的相对层级；命令会创建缺失的嵌套输出目录，但目标根目录必须预先存在。
+- 成功后默认删除原文件；`--remove false` 保留原文件。
 - `*_output.mp4` 会跳过；失败时保留原文件并清理不完整输出。
+- 执行压缩时会直接显示 FFmpeg 原始 stdout/stderr。
+- 未加 `--execute/-x` 时仅预览输入/输出路径，不写入文件。
 
 安装：
 ```bash
@@ -33,24 +37,29 @@ sudo mv compress-vedio  /usr/local/bin/
 ```
 
 ```text
-compress-vedio --dir/-d <directory> [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
+compress-vedio --source/-s <directory> [--dest/-d <directory>] [--remove <true|false>] [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
 ```
 
 | 选项 | 说明 |
 | --- | --- |
-| `--dir`, `-d` | 必填，递归扫描的目录。 |
-| `--execute`, `-x` | 直接压缩所有发现的文件；省略时仅预览，不修改文件或调用 ffmpeg。 |
+| `--source`, `-s` | 必填，递归扫描的源目录。 |
+| `--dest`, `-d` | 可选，输出根目录；必须已经存在。 |
+| `--remove` | 是否在成功后删除源文件；默认值 `true`。 |
+| `--execute`, `-x` | 直接压缩所有发现的文件；省略时仅预览，不修改文件。 |
 | `--ff-option`, `-f` | 传给 ffmpeg 的编码选项字符串。默认值为 `-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k`。 |
 | `--help`, `-h` | 显示帮助。 |
 
-`--execute/-x` 直接压缩所有发现的文件。`--ff-option` 支持引号和反斜杠转义，且不会经由 shell 执行。
+未指定 `--dest/-d` 时，输出文件与源文件同目录。指定 `--dest/-d` 时，源目录内的相对路径会保留到目标目录下。`--execute/-x` 直接压缩所有发现的文件。`--ff-option` 支持引号和反斜杠转义，且不会经由 shell 执行。
 
 ```bash
-# 仅仅预览要压缩哪些文件，不会真的执行
-compress-vedio --dir /Volumes/Data/Videos
+# 仅预览输入与输出路径，不会写入文件
+compress-vedio --source /Volumes/Data/Videos
 
-# 实施压缩
-compress-vedio --dir /Volumes/Data/Videos --execute
+# 直接在源目录旁生成 *_output.mp4，并在成功后删除源文件
+compress-vedio --source /Volumes/Data/Videos --execute
+
+# 写入已有目标目录，保留源目录相对层级，并保留源文件
+compress-vedio --source /Volumes/Data/Videos --dest /Volumes/Data/Archive --remove false --execute
 ```
 
 

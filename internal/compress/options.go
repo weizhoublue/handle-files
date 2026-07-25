@@ -13,23 +13,30 @@ import (
 const DefaultFFOptions = "-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k"
 
 type Options struct {
-	Directory string
-	Execute   bool
-	FFArgs    []string
+	Source      string
+	Destination string
+	Remove      bool
+	Execute     bool
+	FFArgs      []string
 }
 
 func ParseOptions(args []string) (Options, error) {
 	var (
-		directory string
-		execute   bool
-		ffOption  string
-		help      bool
+		source      string
+		destination string
+		remove      string = "true"
+		execute     bool
+		ffOption    string
+		help        bool
 	)
 
 	fs := flag.NewFlagSet("compress-vedio", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&directory, "dir", "", "directory to scan")
-	fs.StringVar(&directory, "d", "", "directory to scan")
+	fs.StringVar(&source, "source", "", "source directory")
+	fs.StringVar(&source, "s", "", "source directory")
+	fs.StringVar(&destination, "dest", "", "destination directory")
+	fs.StringVar(&destination, "d", "", "destination directory")
+	fs.StringVar(&remove, "remove", remove, "remove source after successful compression")
 	fs.BoolVar(&execute, "execute", false, "compress files")
 	fs.BoolVar(&execute, "x", false, "compress files")
 	fs.StringVar(&ffOption, "ff-option", "", "ffmpeg options")
@@ -52,20 +59,38 @@ func ParseOptions(args []string) (Options, error) {
 	if len(fs.Args()) > 0 {
 		return Options{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	if directory == "" {
-		return Options{}, errors.New("--dir is required")
+	if source == "" {
+		return Options{}, errors.New("--source is required")
+	}
+	if remove != "true" && remove != "false" {
+		return Options{}, fmt.Errorf("invalid --remove value %q: want true or false", remove)
 	}
 
-	absoluteDirectory, err := filepath.Abs(directory)
+	absoluteSource, err := filepath.Abs(source)
 	if err != nil {
-		return Options{}, fmt.Errorf("resolve directory %q: %w", directory, err)
+		return Options{}, fmt.Errorf("resolve source directory %q: %w", source, err)
 	}
-	info, err := os.Stat(absoluteDirectory)
+	sourceInfo, err := os.Stat(absoluteSource)
 	if err != nil {
-		return Options{}, fmt.Errorf("stat directory %q: %w", absoluteDirectory, err)
+		return Options{}, fmt.Errorf("stat source directory %q: %w", absoluteSource, err)
 	}
-	if !info.IsDir() {
-		return Options{}, fmt.Errorf("path %q is not a directory", absoluteDirectory)
+	if !sourceInfo.IsDir() {
+		return Options{}, fmt.Errorf("path %q is not a directory", absoluteSource)
+	}
+
+	var absoluteDestination string
+	if destination != "" {
+		absoluteDestination, err = filepath.Abs(destination)
+		if err != nil {
+			return Options{}, fmt.Errorf("resolve destination directory %q: %w", destination, err)
+		}
+		destinationInfo, err := os.Stat(absoluteDestination)
+		if err != nil {
+			return Options{}, fmt.Errorf("stat destination directory %q: %w", absoluteDestination, err)
+		}
+		if !destinationInfo.IsDir() {
+			return Options{}, fmt.Errorf("path %q is not a directory", absoluteDestination)
+		}
 	}
 
 	if !ffOptionSet {
@@ -77,27 +102,31 @@ func ParseOptions(args []string) (Options, error) {
 	}
 
 	return Options{
-		Directory: absoluteDirectory,
-		Execute:   execute,
-		FFArgs:    ffArgs,
+		Source:      absoluteSource,
+		Destination: absoluteDestination,
+		Remove:      remove == "true",
+		Execute:     execute,
+		FFArgs:      ffArgs,
 	}, nil
 }
 
 func Usage() string {
-	return `Usage: compress-vedio --dir/-d <directory> [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
+	return `Usage: compress-vedio --source/-s <directory> [--dest/-d <directory>] [--remove <true|false>] [--execute/-x] [--ff-option/-f "<ffmpeg options>"]
 
 Options:
-  --dir, -d         directory to scan
+  --source, -s      source directory
+  --dest, -d        destination directory
+  --remove          remove source after successful compression, 默认值 true
   --execute, -x     compress files
   --ff-option, -f   ffmpeg options, 默认值 "-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k"
   --help, -h        show help
 
 例子
 	# 仅仅预览（要压缩哪些文件），不会真的执行
-	compress-vedio -d /Volumes/Data/Videos
+	compress-vedio -s /Volumes/Data/Videos
 
 	# 实施压缩
-	compress-vedio -d /Volumes/Data/Videos -x 
+	compress-vedio -s /Volumes/Data/Videos -d /Volumes/Data/Archive --remove false -x 
 
 `
 }
