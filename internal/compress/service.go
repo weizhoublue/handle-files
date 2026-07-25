@@ -59,13 +59,14 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 	if opts.Destination != "" {
 		outputRoot = opts.Destination
 	}
-	logger.Info("run_config",
-		logx.Field{Key: "source", Value: opts.Source},
-		logx.Field{Key: "output_root", Value: outputRoot},
-		logx.Field{Key: "execute", Value: strconv.FormatBool(opts.Execute)},
-		logx.Field{Key: "remove", Value: strconv.FormatBool(opts.Remove)},
+	logger.Info("run config: ",
+		logx.Field{Key: "source_dir", Value: opts.Source},
+		logx.Field{Key: "output_dir", Value: outputRoot},
+		logx.Field{Key: "execute_copy", Value: strconv.FormatBool(opts.Execute)},
+		logx.Field{Key: "remove_original", Value: strconv.FormatBool(opts.Remove)},
 		logx.Field{Key: "ffmpeg_args", Value: strings.Join(opts.FFArgs, " ")},
 	)
+	fmt.Println("")
 
 	ffmpegPath, err := runner.LookPath("ffmpeg")
 	if err != nil {
@@ -84,6 +85,7 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 	if err != nil {
 		return Summary{}, fmt.Errorf("discover MP4 files: %w", err)
 	}
+	fmt.Println("")
 
 	summary := Summary{Total: len(files)}
 	if !opts.Execute {
@@ -103,6 +105,8 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 	}
 
 	for _, path := range files {
+    	fmt.Println("")
+    	fmt.Println("")
 		output, err := outputPath(opts, path)
 		if err != nil {
 			return summary, fmt.Errorf("compute output path for %q: %w", path, err)
@@ -183,6 +187,8 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 			{Key: "reduction_percent", Value: fmt.Sprintf("%.2f", reductionPercent)},
 		}, progressFields(summary))
 	}
+
+	fmt.Println("")
 	logSummary(logger, summary)
 	return summary, nil
 }
