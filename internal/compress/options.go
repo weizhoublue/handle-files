@@ -125,8 +125,10 @@ Options:
 	# 仅仅预览（要压缩哪些文件），不会真的执行
 	compress-vedio -s /Volumes/Data/Videos
 
-	# 实施压缩
-	compress-vedio -s /Volumes/Data/Videos -d /Volumes/Data/Archive --remove false -x 
+	# 实施压缩, 并且压缩后的文件 位于 原目录
+	compress-vedio -s /Volumes/Data/Videos -d /Volumes/Data/Archive -x 
 
+	# 实施压缩, 压缩后的文件 位于 新目录，且不删除原来的老文件
+	compress-vedio -s /Volumes/Data/Videos -d /Volumes/Data/Archive --remove false -x 
 `
 }
