@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/weizhoublue/handle-files/internal/logx"
@@ -175,6 +176,20 @@ func Run(opts Options, logger logx.Logger) error {
 				},
 				copyProgressFields(completed+1, len(candidates), succeeded, failed),
 			)
+			if errors.Is(err, syscall.ENOSPC) {
+				remaining := candidates[completed:]
+				logger.Warn("copy_aborted_no_space",
+					logx.Field{Key: "error", Value: err.Error()},
+					logx.Field{Key: "failed_path", Value: path},
+					logx.Field{Key: "remaining", Value: strconv.Itoa(len(remaining))},
+				)
+				for _, remainingPath := range remaining {
+					logger.Warn("copy_not_completed",
+						logx.Field{Key: "path", Value: remainingPath},
+					)
+				}
+				break
+			}
 		} else {
 			succeeded++
 			logger.InfoProgress(

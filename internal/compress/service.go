@@ -18,6 +18,7 @@ import (
 type CommandRunner interface {
 	LookPath(name string) (string, error)
 	Run(ctx context.Context, name string, args ...string) error
+	RunWithOutput(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) error
 }
 
 type execRunner struct{}
@@ -34,6 +35,13 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) error {
 	return exec.CommandContext(ctx, name, args...).Run()
 }
 
+func (execRunner) RunWithOutput(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) error {
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	return command.Run()
+}
+
 type Summary struct {
 	Total     int
 	Succeeded int
@@ -47,6 +55,18 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 		return Summary{}, errors.New("ffmpeg command runner is required")
 	}
 
+	outputRoot := opts.Source
+	if opts.Destination != "" {
+		outputRoot = opts.Destination
+	}
+	logger.Info("run_config",
+		logx.Field{Key: "source", Value: opts.Source},
+		logx.Field{Key: "output_root", Value: outputRoot},
+		logx.Field{Key: "execute", Value: strconv.FormatBool(opts.Execute)},
+		logx.Field{Key: "remove", Value: strconv.FormatBool(opts.Remove)},
+		logx.Field{Key: "ffmpeg_args", Value: strings.Join(opts.FFArgs, " ")},
+	)
+
 	ffmpegPath, err := runner.LookPath("ffmpeg")
 	if err != nil {
 		return Summary{}, fmt.Errorf("ffmpeg dependency lookup failed: %w", err)
@@ -55,7 +75,7 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 		return Summary{}, fmt.Errorf("ffmpeg dependency health check (-version) failed: %w", err)
 	}
 
-	files, err := walkMP4Files(opts.Directory, func(path string) {
+	files, err := walkMP4Files(opts.Source, func(path string) {
 		logger.Info("skip",
 			logx.Field{Key: "path", Value: path},
 			logx.Field{Key: "reason", Value: "already_processed"},
@@ -68,9 +88,13 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 	summary := Summary{Total: len(files)}
 	if !opts.Execute {
 		for _, path := range files {
+			output, err := outputPath(opts, path)
+			if err != nil {
+				return summary, fmt.Errorf("compute output path for %q: %w", path, err)
+			}
 			logger.Info("preview",
 				logx.Field{Key: "input", Value: path},
-				logx.Field{Key: "output", Value: outputPath(path)},
+				logx.Field{Key: "output", Value: output},
 			)
 			summary.Succeeded++
 		}
@@ -79,13 +103,28 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 	}
 
 	for _, path := range files {
-		output := outputPath(path)
+		output, err := outputPath(opts, path)
+		if err != nil {
+			return summary, fmt.Errorf("compute output path for %q: %w", path, err)
+		}
 
 		args := make([]string, 0, len(opts.FFArgs)+3)
 		args = append(args, "-i", path)
 		args = append(args, opts.FFArgs...)
 		args = append(args, output)
-		if err := runner.Run(ctx, ffmpegPath, args...); err != nil {
+		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+			summary.Failed++
+			logger.ErrorProgress("output_dir_create_failed", []logx.Field{
+				{Key: "error", Value: err.Error()},
+				{Key: "path", Value: filepath.Dir(output)},
+			}, progressFields(summary))
+			continue
+		}
+		logger.Info("compress_started",
+			logx.Field{Key: "input", Value: path},
+			logx.Field{Key: "output", Value: output},
+		)
+		if err := runner.RunWithOutput(ctx, logger.Out, logger.Err, ffmpegPath, args...); err != nil {
 			summary.Failed++
 			fields := []logx.Field{
 				{Key: "error", Value: err.Error()},
@@ -123,13 +162,15 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 		if sourceInfo.Size() != 0 {
 			reductionPercent = float64(reductionBytes) / float64(sourceInfo.Size()) * 100
 		}
-		if err := os.Remove(path); err != nil {
-			summary.Failed++
-			logger.ErrorProgress("source_delete_failed", []logx.Field{
-				{Key: "error", Value: err.Error()},
-				{Key: "path", Value: path},
-			}, progressFields(summary))
-			continue
+		if opts.Remove {
+			if err := os.Remove(path); err != nil {
+				summary.Failed++
+				logger.ErrorProgress("source_delete_failed", []logx.Field{
+					{Key: "error", Value: err.Error()},
+					{Key: "path", Value: path},
+				}, progressFields(summary))
+				continue
+			}
 		}
 
 		summary.Succeeded++
@@ -184,10 +225,18 @@ func walkMP4Files(root string, skipped func(string)) ([]string, error) {
 	return files, nil
 }
 
-func outputPath(input string) string {
+func outputPath(opts Options, input string) (string, error) {
 	extension := filepath.Ext(input)
-	stem := strings.TrimSuffix(input, extension)
-	return stem + "_output" + extension
+	outputName := strings.TrimSuffix(filepath.Base(input), extension) + "_output" + extension
+	if opts.Destination == "" {
+		return filepath.Join(filepath.Dir(input), outputName), nil
+	}
+
+	relativePath, err := filepath.Rel(opts.Source, input)
+	if err != nil {
+		return "", fmt.Errorf("relative path: %w", err)
+	}
+	return filepath.Join(opts.Destination, filepath.Dir(relativePath), outputName), nil
 }
 
 func progressFields(summary Summary) []logx.Field {

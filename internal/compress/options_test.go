@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -54,10 +55,82 @@ func TestParseFFOptionsRejectsMalformedValues(t *testing.T) {
 	}
 }
 
-func TestParseOptionsRejectsConfirmationFlag(t *testing.T) {
-	_, err := ParseOptions([]string{"--dir", t.TempDir(), "--yes"})
+func TestParseOptionsAcceptsSourceDestinationAndRemove(t *testing.T) {
+	source, destination := t.TempDir(), t.TempDir()
+	got, err := ParseOptions([]string{
+		"-s", source, "-d", destination, "--remove", "false", "-x",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != source || got.Destination != destination ||
+		got.Remove || !got.Execute {
+		t.Fatalf("ParseOptions() = %#v", got)
+	}
+}
+
+func TestParseOptionsDefaultsRemoveToTrue(t *testing.T) {
+	source := t.TempDir()
+	got, err := ParseOptions([]string{"--source", source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != source || !got.Remove {
+		t.Fatalf("ParseOptions() = %#v", got)
+	}
+}
+
+func TestParseOptionsAcceptsRemoveEqualsForm(t *testing.T) {
+	source := t.TempDir()
+	got, err := ParseOptions([]string{"--source", source, "--remove=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Remove {
+		t.Fatalf("ParseOptions() = %#v", got)
+	}
+}
+
+func TestParseOptionsRejectsUndefinedDirFlag(t *testing.T) {
+	_, err := ParseOptions([]string{"--dir", t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
-		t.Fatalf("ParseOptions(--yes) error = %v", err)
+		t.Fatalf("ParseOptions(--dir) error = %v", err)
+	}
+}
+
+func TestParseOptionsRejectsOldDashDAliasAsSourceDirectory(t *testing.T) {
+	_, err := ParseOptions([]string{"-d", t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "--source is required") {
+		t.Fatalf("ParseOptions(-d) error = %v", err)
+	}
+}
+
+func TestParseOptionsRejectsInvalidDestinationAndRemove(t *testing.T) {
+	source := t.TempDir()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing destination",
+			args: []string{"--source", source, "--dest", filepath.Join(source, "missing")},
+			want: filepath.Join(source, "missing"),
+		},
+		{
+			name: "invalid remove",
+			args: []string{"--source", source, "--remove", "invalid"},
+			want: "--remove",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseOptions(tt.args)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.want)) {
+				t.Fatalf("ParseOptions() error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -72,10 +145,10 @@ func TestParseOptionsRejectsInvalidDirectoriesAndArguments(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "empty directory", args: []string{"--dir", ""}, want: "--dir is required"},
-		{name: "missing directory", args: []string{"--dir", t.TempDir() + "/missing"}, want: "directory"},
-		{name: "file supplied as directory", args: []string{"--dir", file}, want: "not a directory"},
-		{name: "positional argument", args: []string{"--dir", t.TempDir(), "extra"}, want: "unexpected positional arguments"},
+		{name: "empty source", args: []string{"--source", ""}, want: "--source is required"},
+		{name: "missing source", args: []string{"--source", t.TempDir() + "/missing"}, want: "source directory"},
+		{name: "file supplied as source", args: []string{"--source", file}, want: "not a directory"},
+		{name: "positional argument", args: []string{"--source", t.TempDir(), "extra"}, want: "unexpected positional arguments"},
 	}
 
 	for _, tt := range tests {
@@ -89,9 +162,9 @@ func TestParseOptionsRejectsInvalidDirectoriesAndArguments(t *testing.T) {
 }
 
 func TestParseOptionsAcceptsShortFlagsAndExplicitValues(t *testing.T) {
-	dir := t.TempDir()
+	source := t.TempDir()
 	got, err := ParseOptions([]string{
-		"-d", dir,
+		"-s", source,
 		"-x",
 		"-f", `-c:v libx264 -metadata title="A clip"`,
 	})
@@ -99,20 +172,21 @@ func TestParseOptionsAcceptsShortFlagsAndExplicitValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Options{
-		Directory: dir,
-		Execute:   true,
-		FFArgs:    []string{"-c:v", "libx264", "-metadata", "title=A clip"},
+		Source:  source,
+		Remove:  true,
+		Execute: true,
+		FFArgs:  []string{"-c:v", "libx264", "-metadata", "title=A clip"},
 	}
-	if got.Directory != want.Directory || got.Execute != want.Execute ||
+	if got.Source != want.Source || got.Remove != want.Remove || got.Execute != want.Execute ||
 		!slices.Equal(got.FFArgs, want.FFArgs) {
 		t.Fatalf("ParseOptions() = %#v, want %#v", got, want)
 	}
 }
 
 func TestParseOptionsAcceptsLongFlagsAndQuotedEscapedFFOptions(t *testing.T) {
-	dir := t.TempDir()
+	source := t.TempDir()
 	got, err := ParseOptions([]string{
-		"--dir", dir,
+		"--source", source,
 		"--execute",
 		"--ff-option", `-metadata title="A clip" -vf scale=1280\:720`,
 	})
@@ -126,7 +200,7 @@ func TestParseOptionsAcceptsLongFlagsAndQuotedEscapedFFOptions(t *testing.T) {
 }
 
 func TestParseOptionsRejectsExplicitEmptyFFOption(t *testing.T) {
-	_, err := ParseOptions([]string{"--dir", t.TempDir(), "--ff-option", ""})
+	_, err := ParseOptions([]string{"--source", t.TempDir(), "--ff-option", ""})
 	if err == nil || !strings.Contains(err.Error(), "invalid --ff-option") ||
 		!strings.Contains(err.Error(), "empty ffmpeg option") {
 		t.Fatalf("ParseOptions() error = %v, want explicit empty ff-option rejection", err)
@@ -134,7 +208,7 @@ func TestParseOptionsRejectsExplicitEmptyFFOption(t *testing.T) {
 }
 
 func TestParseOptionsUsesDefaultFFOptions(t *testing.T) {
-	got, err := ParseOptions([]string{"--dir", t.TempDir()})
+	got, err := ParseOptions([]string{"--source", t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

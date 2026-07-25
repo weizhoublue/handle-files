@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -503,6 +505,52 @@ func TestRunCleansPartialDestinationAfterInjectedFailures(t *testing.T) {
 			}
 			requireCopyFailureRecord(t, logs.String())
 		})
+	}
+}
+
+func TestRunStopsCopyAfterNoSpace(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	failedSource := filepath.Join(source, "a-fails.txt")
+	writeFile(t, failedSource, "failed", 0o600)
+	writeFile(t, filepath.Join(source, "b-unstarted.txt"), "unstarted", 0o600)
+	var logs bytes.Buffer
+
+	original := copyStream
+	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
+		if sourceFile, ok := source.(*os.File); ok && sourceFile.Name() == failedSource {
+			return 0, fmt.Errorf("injected no space: %w", syscall.ENOSPC)
+		}
+		return io.Copy(destination, source)
+	}
+	t.Cleanup(func() {
+		copyStream = original
+	})
+
+	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "b-unstarted.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("later copy was attempted: %v", err)
+	}
+	if !strings.Contains(logs.String(), "WARN, copy_aborted_no_space") {
+		t.Fatalf("missing no-space summary:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "WARN, copy_not_completed path=a-fails.txt") {
+		t.Fatalf("failed path missing from summary:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "WARN, copy_not_completed path=b-unstarted.txt") {
+		t.Fatalf("unstarted path missing from summary:\n%s", logs.String())
+	}
+	if strings.Index(logs.String(), "WARN, copy_not_completed path=a-fails.txt") >
+		strings.Index(logs.String(), "WARN, copy_not_completed path=b-unstarted.txt") {
+		t.Fatalf("copy_not_completed records out of order:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "INFO, copied ") {
+		t.Fatalf("unexpected successful copy:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "INFO, difference_summary consistent=0 copied=0 destination_larger=0 extra=0 failed=1 missing=2 source_larger=0") {
+		t.Fatalf("difference summary missing failed count:\n%s", logs.String())
 	}
 }
 

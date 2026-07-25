@@ -13,21 +13,35 @@ import (
 func TestCompressVedioExecuteUsesFakeFFmpeg(t *testing.T) {
 	binary := buildBinary(t, "./cmd/compress-vedio")
 	root := t.TempDir()
-	input := filepath.Join(root, "clip.mp4")
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "destination")
+	input := filepath.Join(source, "nested", "clip.mp4")
+	mkdirAll(t, destination)
 	writeFile(t, input, "input")
 	fakeBin := writeFakeFFmpeg(t)
 
-	output, err := runCommand(binary, []string{"--dir", root, "--execute"}, fakeBin, nil)
+	output, err := runCommand(binary, []string{
+		"--source", source,
+		"--dest", destination,
+		"--remove", "false",
+		"--execute",
+	}, fakeBin, nil)
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, output)
 	}
-	if _, err := os.Stat(input); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("source still exists: %v", err)
+	if _, err := os.Stat(input); err != nil {
+		t.Fatalf("source missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "clip_output.mp4")); err != nil {
+	if _, err := os.Stat(filepath.Join(destination, "nested", "clip_output.mp4")); err != nil {
 		t.Fatalf("compressed output missing: %v", err)
 	}
-	assertReadableOutput(t, output, "INFO, compressed ")
+	if _, err := os.Stat(filepath.Join(source, "nested", "clip_output.mp4")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source tree unexpectedly contains output: %v", err)
+	}
+	assertReadableOutput(t, output, "INFO, compress_started ")
+	if !strings.Contains(string(output), "fake ffmpeg: encoding") {
+		t.Fatalf("missing raw ffmpeg stderr: %s", output)
+	}
 	if !strings.Contains(string(output), "completed=1") ||
 		!strings.Contains(string(output), "total=1") {
 		t.Fatalf("missing progress: %s", output)
@@ -42,7 +56,7 @@ func TestCompressVedioExecuteCompressesAllFilesWithoutStdin(t *testing.T) {
 	writeFile(t, firstInput, "first")
 	writeFile(t, secondInput, "second")
 
-	output, err := runCommand(binary, []string{"--dir", root, "--execute"}, writeFakeFFmpeg(t), nil)
+	output, err := runCommand(binary, []string{"--source", root, "--execute"}, writeFakeFFmpeg(t), nil)
 	if err != nil {
 		t.Fatalf("command failed: %v\n%s", err, output)
 	}
@@ -135,9 +149,25 @@ func TestInvalidFlagsFailWithStructuredValidationError(t *testing.T) {
 	}
 }
 
+func TestCompressVedioRejectsDeprecatedSourceFlags(t *testing.T) {
+	root := t.TempDir()
+	for name, args := range map[string][]string{
+		"dir": {"--dir", root},
+		"d":   {"-d", root},
+	} {
+		t.Run(name, func(t *testing.T) {
+			output, err := runCommand(buildBinary(t, "./cmd/compress-vedio"), args, "", nil)
+			if err == nil {
+				t.Fatalf("deprecated flag succeeded: %s", output)
+			}
+			assertReadableOutput(t, output, "ERROR, validation_failed ")
+		})
+	}
+}
+
 func TestCompressVedioMissingFFmpegFailsWithStructuredError(t *testing.T) {
 	root := t.TempDir()
-	output, err := runCommand(buildBinary(t, "./cmd/compress-vedio"), []string{"--dir", root}, t.TempDir(), nil)
+	output, err := runCommand(buildBinary(t, "./cmd/compress-vedio"), []string{"--source", root}, t.TempDir(), nil)
 	if err == nil {
 		t.Fatalf("missing ffmpeg succeeded: %s", output)
 	}
@@ -176,7 +206,7 @@ func writeFakeFFmpeg(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
 	path := filepath.Join(directory, "ffmpeg")
-	script := "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  exit 0\nfi\nfor output do :; done\n: > \"$output\"\nexit 0\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  exit 0\nfi\nprintf '%s\\n' 'fake ffmpeg: encoding' >&2\nfor output do :; done\n: > \"$output\"\nexit 0\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake ffmpeg: %v", err)
 	}
