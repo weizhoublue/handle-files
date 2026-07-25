@@ -95,10 +95,18 @@ func Usage() string {
 	return `Usage: compress-vedio --dir/-d <directory> [--execute/-x] [--yes/-y] [--ff-option/-f "<ffmpeg options>"]
 
 Options:
-  --dir, -d       directory to scan
-  --execute, -x   compress files
-  --yes, -y       confirm compression
-  --ff-option, -f ffmpeg options
-  --help, -h      show help
+  --dir, -d         directory to scan
+  --execute, -x     compress files
+  --yes, -y         confirm compression
+  --ff-option, -f   ffmpeg options, 默认值 "-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k"
+  --help, -h        show help
+
+例子
+	# 仅仅预览（要压缩哪些文件），不会真的执行
+	compress-vedio -d /Volumes/Data/Videos
+
+	# 实施压缩
+	compress-vedio -d /Volumes/Data/Videos -x 
+
 `
 }

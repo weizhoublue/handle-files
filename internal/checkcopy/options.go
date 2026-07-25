@@ -101,5 +101,12 @@ Options:
   --destination, -d  destination directory
   --copy, -c         copy missing and smaller destination files
   --help, -h         show help
+
+例子
+	# 预览要拷贝那些文件，并不会实施
+	check-copy -s /Volumes/red/1 -d /Volumes/black/1
+
+	# 实施拷贝
+	check-copy -s /Volumes/red/1 -d /Volumes/black/1 -c
 `
 }

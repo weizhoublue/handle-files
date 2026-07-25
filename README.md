@@ -21,6 +21,15 @@ make build-macos
 安装：
 ```bash
 brew install ffmpeg
+
+# ARCH="amd64"
+ARCH="arm64"
+curl -LO https://github.com/weizhoublue/handle-files/releases/latest/download/compress-vedio-macos-${ARCH}
+chmod +x compress-vedio-macos-${ARCH}
+mv compress-vedio-macos-${ARCH} compress-vedio
+sudo rm -f /usr/local/bin/compress-vedio
+sudo mv compress-vedio  /usr/local/bin/
+
 ```
 
 ```text
@@ -55,6 +64,16 @@ compress-vedio --dir /Volumes/Data/Videos -x
 - 在复制模式中，冲突组内每个源路径都会跳过，其他非冲突复制继续。
 - 全部处理完成后，程序会发出一条结构化警告，报告跳过的冲突组数和文件数。
 
+```bash
+# ARCH="amd64"
+ARCH="arm64"
+curl -LO https://github.com/weizhoublue/handle-files/releases/latest/download/check-copy-macos-${ARCH}
+chmod +x check-copy-macos-${ARCH}
+mv check-copy-macos-${ARCH} check-copy
+sudo rm -f /usr/local/bin/check-copy
+sudo mv check-copy  /usr/local/bin/
+```
+
 ```text
 check-copy --source/-s <directory> --destination/-d <directory> [--copy/-c]
 ```
@@ -67,6 +86,6 @@ check-copy --source/-s <directory> --destination/-d <directory> [--copy/-c]
 | `--help`, `-h` | 显示帮助。 |
 
 ```bash
-dist/macos-arm64/check-copy -s /Volumes/red/1 -d /Volumes/black/1 --copy
+check-copy -s /Volumes/red/1 -d /Volumes/black/1 -c
 ```
 
