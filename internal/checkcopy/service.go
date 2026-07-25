@@ -15,6 +15,15 @@ import (
 	"github.com/weizhoublue/handle-files/internal/logx"
 )
 
+var (
+	scanEntryInfo = func(dirEntry fs.DirEntry) (fs.FileInfo, error) {
+		return dirEntry.Info()
+	}
+	copyStream  = io.Copy
+	changeMode  = os.Chmod
+	changeTimes = os.Chtimes
+)
+
 type Entry struct {
 	Size    int64
 	Mode    fs.FileMode
@@ -46,7 +55,7 @@ func Scan(root string, logger logx.Logger) (map[string]Entry, error) {
 			}
 			return walkErr
 		}
-		info, err := dirEntry.Info()
+		info, err := scanEntryInfo(dirEntry)
 		if err != nil {
 			logger.Warn("scan_info_failed",
 				logx.Field{Key: "error", Value: err.Error()},
@@ -104,6 +113,12 @@ func Compare(source, destination map[string]Entry) Comparison {
 
 func Run(opts Options, logger logx.Logger) error {
 	logger = usableLogger(logger)
+	normalizedOptions, err := normalizeOptions(opts)
+	if err != nil {
+		return err
+	}
+	opts = normalizedOptions
+
 	source, err := Scan(opts.Source, logger)
 	if err != nil {
 		return err
@@ -123,6 +138,14 @@ func Run(opts Options, logger logx.Logger) error {
 		}
 		return nil
 	}
+
+	conflictedPaths := make(map[string]struct{})
+	for _, group := range comparison.CaseConflicts {
+		for _, path := range group {
+			conflictedPaths[path] = struct{}{}
+		}
+	}
+	candidates = withoutConflictedPaths(candidates, conflictedPaths)
 
 	succeeded := 0
 	failed := 0
@@ -144,7 +167,31 @@ func Run(opts Options, logger logx.Logger) error {
 			logx.Field{Key: "failed", Value: strconv.Itoa(failed)},
 		)
 	}
+	if len(comparison.CaseConflicts) > 0 {
+		logger.Warn("case_conflicts_skipped",
+			logx.Field{Key: "groups", Value: strconv.Itoa(len(comparison.CaseConflicts))},
+			logx.Field{Key: "paths", Value: strings.Join(conflictedPathsInOrder(comparison.CaseConflicts), ",")},
+		)
+	}
 	return nil
+}
+
+func withoutConflictedPaths(paths []string, conflicted map[string]struct{}) []string {
+	filtered := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, ok := conflicted[path]; !ok {
+			filtered = append(filtered, path)
+		}
+	}
+	return filtered
+}
+
+func conflictedPathsInOrder(groups [][]string) []string {
+	paths := make([]string, 0)
+	for _, group := range groups {
+		paths = append(paths, group...)
+	}
+	return paths
 }
 
 func caseConflicts(source map[string]Entry) [][]string {
@@ -175,8 +222,17 @@ func caseConflicts(source map[string]Entry) [][]string {
 func copyFile(sourceRoot, destinationRoot, relativePath string, entry Entry) error {
 	sourcePath := filepath.Join(sourceRoot, filepath.FromSlash(relativePath))
 	destinationPath := filepath.Join(destinationRoot, filepath.FromSlash(relativePath))
+	if err := verifyRegularFile(sourcePath); err != nil {
+		return fmt.Errorf("verify source: %w", err)
+	}
+	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
+		return fmt.Errorf("verify destination: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
 		return fmt.Errorf("create destination directory: %w", err)
+	}
+	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
+		return fmt.Errorf("verify destination: %w", err)
 	}
 
 	sourceFile, err := os.Open(sourcePath)
@@ -189,30 +245,91 @@ func copyFile(sourceRoot, destinationRoot, relativePath string, entry Entry) err
 	if err != nil {
 		return fmt.Errorf("open destination: %w", err)
 	}
-	if _, err := io.Copy(destinationFile, sourceFile); err != nil {
+	if _, err := copyStream(destinationFile, sourceFile); err != nil {
 		destinationFile.Close()
-		cleanupPartial(destinationPath)
-		return fmt.Errorf("write destination: %w", err)
+		return copyFailure(destinationRoot, relativePath, "write destination", err)
 	}
 	if err := destinationFile.Close(); err != nil {
-		cleanupPartial(destinationPath)
-		return fmt.Errorf("close destination: %w", err)
+		return copyFailure(destinationRoot, relativePath, "close destination", err)
 	}
-	if err := os.Chmod(destinationPath, entry.Mode.Perm()); err != nil {
-		cleanupPartial(destinationPath)
-		return fmt.Errorf("set destination mode: %w", err)
+	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
+		return copyFailure(destinationRoot, relativePath, "verify destination before setting mode", err)
 	}
-	if err := os.Chtimes(destinationPath, entry.ModTime, entry.ModTime); err != nil {
-		cleanupPartial(destinationPath)
-		return fmt.Errorf("set destination modification time: %w", err)
+	if err := changeMode(destinationPath, entry.Mode.Perm()); err != nil {
+		return copyFailure(destinationRoot, relativePath, "set destination mode", err)
+	}
+	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
+		return copyFailure(destinationRoot, relativePath, "verify destination before setting modification time", err)
+	}
+	if err := changeTimes(destinationPath, entry.ModTime, entry.ModTime); err != nil {
+		return copyFailure(destinationRoot, relativePath, "set destination modification time", err)
 	}
 	return nil
 }
 
-func cleanupPartial(path string) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return
+func verifyRegularFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
 	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("source path is not a regular file")
+	}
+	return nil
+}
+
+func verifyDestinationPath(root, relativePath string) error {
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return errors.New("destination root is not a directory")
+	}
+
+	relativePath = filepath.Clean(filepath.FromSlash(relativePath))
+	if relativePath == "." || filepath.IsAbs(relativePath) || relativePath == ".." ||
+		strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return errors.New("destination path escapes root")
+	}
+
+	current := root
+	components := strings.Split(relativePath, string(filepath.Separator))
+	for index, component := range components {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("destination path component %q is a symlink", current)
+		}
+		if index < len(components)-1 && !info.IsDir() {
+			return fmt.Errorf("destination path component %q is not a directory", current)
+		}
+	}
+	return nil
+}
+
+func copyFailure(destinationRoot, relativePath, operation string, operationErr error) error {
+	if cleanupErr := cleanupPartial(destinationRoot, relativePath); cleanupErr != nil {
+		return fmt.Errorf("%s: %w (cleanup partial destination: %v)", operation, operationErr, cleanupErr)
+	}
+	return fmt.Errorf("%s: %w", operation, operationErr)
+}
+
+func cleanupPartial(destinationRoot, relativePath string) error {
+	if err := verifyDestinationPath(destinationRoot, relativePath); err != nil {
+		return err
+	}
+	destinationPath := filepath.Join(destinationRoot, filepath.FromSlash(relativePath))
+	if err := os.Remove(destinationPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func logComparison(logger logx.Logger, comparison Comparison) {
@@ -227,9 +344,6 @@ func logComparison(logger logx.Logger, comparison Comparison) {
 	}
 	for _, path := range comparison.DestLarger {
 		logger.Info("destination_larger", logx.Field{Key: "path", Value: path})
-	}
-	for _, conflict := range comparison.CaseConflicts {
-		logger.Warn("case_conflict", logx.Field{Key: "paths", Value: strings.Join(conflict, ",")})
 	}
 }
 

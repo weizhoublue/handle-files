@@ -45,22 +45,29 @@ func ParseOptions(args []string) (Options, error) {
 		return Options{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
 	}
 
-	resolvedSource, err := resolveDirectory("source", source)
+	return normalizeOptions(Options{
+		Source:      source,
+		Destination: destination,
+		Copy:        copyFiles,
+	})
+}
+
+func normalizeOptions(opts Options) (Options, error) {
+	resolvedSource, err := resolveDirectory("source", opts.Source)
 	if err != nil {
 		return Options{}, err
 	}
-	resolvedDestination, err := resolveDirectory("destination", destination)
+	resolvedDestination, err := resolveDirectory("destination", opts.Destination)
 	if err != nil {
 		return Options{}, err
 	}
 	if resolvedSource == resolvedDestination {
 		return Options{}, errors.New("source and destination directories must be different")
 	}
-
 	return Options{
 		Source:      resolvedSource,
 		Destination: resolvedDestination,
-		Copy:        copyFiles,
+		Copy:        opts.Copy,
 	}, nil
 }
 
