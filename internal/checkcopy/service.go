@@ -46,7 +46,36 @@ type Comparison struct {
 	CaseConflicts [][]string
 }
 
+type extensionFilter map[string]struct{}
+
+func newExtensionFilter(types []string) extensionFilter {
+	if len(types) == 0 {
+		return nil
+	}
+	filter := make(extensionFilter, len(types))
+	for _, extension := range types {
+		filter[strings.ToLower(extension)] = struct{}{}
+	}
+	return filter
+}
+
+func (filter extensionFilter) matches(name string) bool {
+	if len(filter) == 0 {
+		return true
+	}
+	extension := filepath.Ext(name)
+	if extension == "" || extension == name {
+		return false
+	}
+	_, ok := filter[strings.ToLower(strings.TrimPrefix(extension, "."))]
+	return ok
+}
+
 func Scan(root string, logger logx.Logger) (map[string]Entry, error) {
+	return scan(root, nil, logger)
+}
+
+func scan(root string, filter extensionFilter, logger logx.Logger) (map[string]Entry, error) {
 	logger = usableLogger(logger)
 	entries := make(map[string]Entry)
 	err := filepath.WalkDir(root, func(path string, dirEntry fs.DirEntry, walkErr error) error {
@@ -71,7 +100,7 @@ func Scan(root string, logger logx.Logger) (map[string]Entry, error) {
 			)
 			return nil
 		}
-		if !info.Mode().IsRegular() {
+		if !info.Mode().IsRegular() || !filter.matches(dirEntry.Name()) {
 			return nil
 		}
 		relativePath, err := filepath.Rel(root, path)
@@ -127,11 +156,12 @@ func Run(opts Options, logger logx.Logger) error {
 	}
 	opts = normalizedOptions
 
-	source, err := Scan(opts.Source, logger)
+	filter := newExtensionFilter(opts.Types)
+	source, err := scan(opts.Source, filter, logger)
 	if err != nil {
 		return err
 	}
-	destination, err := Scan(opts.Destination, logger)
+	destination, err := scan(opts.Destination, filter, logger)
 	if err != nil {
 		return err
 	}

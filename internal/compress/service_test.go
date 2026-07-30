@@ -56,8 +56,10 @@ func (r *fakeRunner) RunWithOutput(_ context.Context, stdout, stderr io.Writer, 
 func TestDiscoverMP4FilesSkipsOutputFiles(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "one", "two", "clip.MP4"), "video")
-	mustWrite(t, filepath.Join(root, "one", "two", "clip_output.MP4"), "video")
-	mustWrite(t, filepath.Join(root, "one", "two", "clip_OUTPUT.MP4"), "video")
+	lowerOutput := filepath.Join(root, "one", "two", "clip_output.MP4")
+	upperOutput := filepath.Join(root, "one", "two", "clip_OUTPUT.MP4")
+	mustWrite(t, lowerOutput, "video")
+	mustWrite(t, upperOutput, "video")
 	if err := os.Mkdir(filepath.Join(root, "one", "two", "directory.mp4"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +70,13 @@ func TestDiscoverMP4FilesSkipsOutputFiles(t *testing.T) {
 	}
 	want := []string{
 		filepath.Join(root, "one", "two", "clip.MP4"),
-		filepath.Join(root, "one", "two", "clip_OUTPUT.MP4"),
+	}
+	if lowerInfo, err := os.Stat(lowerOutput); err != nil {
+		t.Fatal(err)
+	} else if upperInfo, err := os.Stat(upperOutput); err != nil {
+		t.Fatal(err)
+	} else if !os.SameFile(lowerInfo, upperInfo) {
+		want = append(want, upperOutput)
 	}
 	if !reflect.DeepEqual(files, want) {
 		t.Fatalf("discoverMP4Files() = %#v, want %#v", files, want)
