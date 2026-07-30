@@ -8,12 +8,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 type Options struct {
 	Source      string
 	Destination string
 	Copy        bool
+	Types       []string
+}
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *stringListFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
 }
 
 func ParseOptions(args []string) (Options, error) {
@@ -21,6 +34,7 @@ func ParseOptions(args []string) (Options, error) {
 		source      string
 		destination string
 		copyFiles   bool
+		types       stringListFlag
 		help        bool
 	)
 
@@ -32,6 +46,8 @@ func ParseOptions(args []string) (Options, error) {
 	flags.StringVar(&destination, "d", "", "destination directory")
 	flags.BoolVar(&copyFiles, "copy", false, "copy missing and smaller destination files")
 	flags.BoolVar(&copyFiles, "c", false, "copy missing and smaller destination files")
+	flags.Var(&types, "type", "file extension to include (repeatable)")
+	flags.Var(&types, "t", "file extension to include (repeatable)")
 	flags.BoolVar(&help, "help", false, "show help")
 	flags.BoolVar(&help, "h", false, "show help")
 
@@ -49,10 +65,44 @@ func ParseOptions(args []string) (Options, error) {
 		Source:      source,
 		Destination: destination,
 		Copy:        copyFiles,
+		Types:       []string(types),
 	})
 }
 
+func normalizeTypes(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		extension := strings.TrimPrefix(strings.TrimSpace(value), ".")
+		if extension == "" ||
+			strings.Contains(extension, ".") ||
+			strings.ContainsAny(extension, `/\`) ||
+			strings.IndexFunc(extension, unicode.IsSpace) >= 0 {
+			return nil, fmt.Errorf(
+				"invalid --type value %q: want one extension without dots, whitespace, or path separators",
+				value,
+			)
+		}
+
+		extension = strings.ToLower(extension)
+		if _, ok := seen[extension]; ok {
+			continue
+		}
+		seen[extension] = struct{}{}
+		normalized = append(normalized, extension)
+	}
+	return normalized, nil
+}
+
 func normalizeOptions(opts Options) (Options, error) {
+	normalizedTypes, err := normalizeTypes(opts.Types)
+	if err != nil {
+		return Options{}, err
+	}
 	resolvedSource, err := resolveDirectory("source", opts.Source)
 	if err != nil {
 		return Options{}, err
@@ -68,6 +118,7 @@ func normalizeOptions(opts Options) (Options, error) {
 		Source:      resolvedSource,
 		Destination: resolvedDestination,
 		Copy:        opts.Copy,
+		Types:       normalizedTypes,
 	}, nil
 }
 
@@ -94,11 +145,12 @@ func resolveDirectory(name, path string) (string, error) {
 }
 
 func Usage() string {
-	return `Usage: check-copy --source/-s <directory> --destination/-d <directory> [--copy/-c]
+	return `Usage: check-copy --source/-s <directory> --destination/-d <directory> [--type/-t <extension>]... [--copy/-c]
 
 Options:
   --source, -s       source directory
   --destination, -d  destination directory
+  --type, -t         file extension to include, repeatable; default: all types
   --copy, -c         copy missing and smaller destination files
   --help, -h         show help
 
@@ -106,7 +158,13 @@ Options:
 	# 预览要拷贝哪些文件，但不会实施拷贝
 	check-copy -s /Volumes/red/1 -d /Volumes/black/1
 
-	# 实施拷贝
+	# 只预览 JPG 文件；jpg、.jpg 和 JPG 等价
+	check-copy -s /Volumes/red/1 -d /Volumes/black/1 -t jpg
+
+	# 只拷贝 JPG 和 MP4 文件
+	check-copy -s /Volumes/red/1 -d /Volumes/black/1 -t jpg -t mp4 -c
+
+	# 不指定 -t 时处理所有文件类型
 	check-copy -s /Volumes/red/1 -d /Volumes/black/1 -c
 `
 }

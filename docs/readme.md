@@ -73,6 +73,8 @@ compress-vedio --source /Volumes/Data/Videos --dest /Volumes/Data/Archive --remo
 - 在复制模式中，冲突组内每个源路径都会跳过，其他非冲突复制继续。
 - 全部处理完成后，程序会发出一条结构化警告，报告跳过的冲突组数和文件数。
 
+指定 `--type/-t` 后，扫描、差异报告、统计和复制都只包含选中的类型；匹配最后一个扩展名，因此 `-t gz` 可匹配 `archive.tar.gz`，点文件 `.gitignore` 不视为 `gitignore` 类型。
+
 ```bash
 # ARCH="amd64"
 ARCH="arm64"
@@ -84,16 +86,27 @@ sudo mv check-copy  /usr/local/bin/
 ```
 
 ```text
-check-copy --source/-s <directory> --destination/-d <directory> [--copy/-c]
+check-copy --source/-s <directory> --destination/-d <directory> [--type/-t <extension>]... [--copy/-c]
 ```
 
 | 选项 | 说明 |
 | --- | --- |
 | `--source`, `-s` | 必填，基准源目录。 |
 | `--destination`, `-d` | 必填，待比较或复制的目标目录。 |
+| `--type`, `-t` | 只处理指定的最后扩展名，可重复；忽略大小写，可写 `jpg` 或 `.jpg`。省略时处理全部常规文件。 |
 | `--copy`, `-c` | 执行复制；省略时仅报告差异。 |
 | `--help`, `-h` | 显示帮助。 |
 
 ```bash
+# 预览要拷贝哪些文件，但不会实施拷贝
+check-copy -s /Volumes/red/1 -d /Volumes/black/1
+
+# 只预览 JPG 文件
+check-copy -s /Volumes/red/1 -d /Volumes/black/1 -t jpg
+
+# 只复制 JPG 和 MP4 文件
+check-copy -s /Volumes/red/1 -d /Volumes/black/1 -t jpg -t mp4 -c
+
+# 复制所有文件类型
 check-copy -s /Volumes/red/1 -d /Volumes/black/1 -c
 ```

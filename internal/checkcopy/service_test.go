@@ -85,6 +85,62 @@ func TestScanReturnsRegularFilesWithSlashRelativePaths(t *testing.T) {
 	}
 }
 
+func TestExtensionFilterMatchesConfiguredTypeCaseInsensitively(t *testing.T) {
+	if !newExtensionFilter([]string{"JPG"}).matches("photo.jpg") {
+		t.Fatal(`newExtensionFilter([]string{"JPG"}).matches("photo.jpg") = false, want true`)
+	}
+}
+
+func TestScanFiltersByFinalExtension(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "photo.JPG"), "photo", 0o600)
+	writeFile(t, filepath.Join(root, "archive.tar.gz"), "archive", 0o600)
+	writeFile(t, filepath.Join(root, ".config.json"), "config", 0o600)
+	writeFile(t, filepath.Join(root, "video.mp4"), "video", 0o600)
+	writeFile(t, filepath.Join(root, ".gitignore"), "ignored", 0o600)
+
+	got, err := scan(
+		root,
+		newExtensionFilter([]string{"jpg", "gz", "json", "gitignore"}),
+		testLogger(&bytes.Buffer{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"photo.JPG", "archive.tar.gz", ".config.json"} {
+		if _, ok := got[path]; !ok {
+			t.Fatalf("scan() files = %#v, want %q", got, path)
+		}
+	}
+	for _, path := range []string{"video.mp4", ".gitignore"} {
+		if _, ok := got[path]; ok {
+			t.Fatalf("scan() files = %#v, did not want %q", got, path)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("scan() files = %#v, want three files", got)
+	}
+}
+
+func TestScanWithoutFilterIncludesExtensionlessAndDotfiles(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "LICENSE"), "license", 0o600)
+	writeFile(t, filepath.Join(root, ".gitignore"), "ignored", 0o600)
+
+	got, err := Scan(root, testLogger(&bytes.Buffer{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"LICENSE", ".gitignore"} {
+		if _, ok := got[path]; !ok {
+			t.Fatalf("Scan() files = %#v, want %q", got, path)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("Scan() files = %#v, want two files", got)
+	}
+}
+
 func TestScanWarnsAndContinuesAfterEntryInformationFailure(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "bad.txt"), "bad", 0o600)
@@ -161,7 +217,16 @@ func TestParseOptionsAcceptsShortNamedFlagsAndResolvesSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != (Options{Source: source, Destination: destination, Copy: true}) {
+	wantSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDestination, err := filepath.EvalSymlinks(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Options{Source: wantSource, Destination: wantDestination, Copy: true}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ParseOptions() = %#v", got)
 	}
 }
@@ -202,7 +267,127 @@ func TestRunReportOnlyDoesNotWriteCopyCandidates(t *testing.T) {
 	}
 }
 
+func TestRunTypeFilterScopesCopyAndSummaries(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	writeFile(t, filepath.Join(source, "photo.JPG"), "photo", 0o600)
+	writeFile(t, filepath.Join(source, "video.mp4"), "video", 0o600)
+	writeFile(t, filepath.Join(source, "ignored.txt"), "ignored", 0o600)
+	writeFile(t, filepath.Join(destination, "extra.jpg"), "extra", 0o600)
+	writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
+	var logs bytes.Buffer
+
+	err := Run(Options{
+		Source:      source,
+		Destination: destination,
+		Copy:        true,
+		Types:       []string{".JPG", "mp4"},
+	}, testLogger(&logs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"photo.JPG", "video.mp4"} {
+		if _, err := os.Stat(filepath.Join(destination, path)); err != nil {
+			t.Fatalf("selected file %q was not copied: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(destination, "ignored.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unselected file was copied: %v", err)
+	}
+	if !strings.Contains(logs.String(), "INFO, scan_summary destination_files=1 source_files=2") {
+		t.Fatalf("scan summary = %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "INFO, difference_summary consistent=0 copied=2 destination_larger=0 extra=1 failed=0 missing=2 source_larger=0") {
+		t.Fatalf("difference summary = %s", logs.String())
+	}
+}
+
+func TestRunTypeFilterScopesReportOnly(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	writeFile(t, filepath.Join(source, "photo.jpg"), "photo", 0o600)
+	writeFile(t, filepath.Join(source, "ignored.txt"), "ignored", 0o600)
+	writeFile(t, filepath.Join(destination, "extra.jpg"), "extra", 0o600)
+	writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
+	var logs bytes.Buffer
+
+	if err := Run(Options{
+		Source:      source,
+		Destination: destination,
+		Types:       []string{"jpg"},
+	}, testLogger(&logs)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "INFO, copy_skipped total=1") {
+		t.Fatalf("copy preview = %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "INFO, scan_summary destination_files=1 source_files=1") {
+		t.Fatalf("scan summary = %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "INFO, difference_summary consistent=0 destination_larger=0 extra=1 missing=1 source_larger=0") {
+		t.Fatalf("difference summary = %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "ignored.txt") || strings.Contains(logs.String(), "extra.txt") {
+		t.Fatalf("unselected file was reported: %s", logs.String())
+	}
+}
+
+func TestRunTypeFilterNoMatchesSucceeds(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	writeFile(t, filepath.Join(source, "ignored.txt"), "ignored", 0o600)
+	writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
+	var logs bytes.Buffer
+
+	if err := Run(Options{
+		Source:      source,
+		Destination: destination,
+		Types:       []string{"jpg"},
+	}, testLogger(&logs)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "INFO, scan_summary destination_files=0 source_files=0") {
+		t.Fatalf("scan summary = %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "INFO, difference_summary consistent=0 destination_larger=0 extra=0 missing=0 source_larger=0") {
+		t.Fatalf("difference summary = %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "copy_skipped") {
+		t.Fatalf("empty selection reported copy candidates: %s", logs.String())
+	}
+}
+
+func TestRunTypeFilterExcludesUnselectedCaseConflicts(t *testing.T) {
+	if !filesystemSupportsCaseOnlyNames(t) {
+		t.Skip("filesystem does not preserve distinct case-only names")
+	}
+	source := t.TempDir()
+	destination := t.TempDir()
+	writeFile(t, filepath.Join(source, "A.jpg"), "first", 0o600)
+	writeFile(t, filepath.Join(source, "a.JPG"), "second", 0o600)
+	writeFile(t, filepath.Join(source, "B.txt"), "third", 0o600)
+	writeFile(t, filepath.Join(source, "b.TXT"), "fourth", 0o600)
+	var logs bytes.Buffer
+
+	if err := Run(Options{
+		Source:      source,
+		Destination: destination,
+		Types:       []string{"jpg"},
+	}, testLogger(&logs)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "WARN, case_conflicts_reported files=2 groups=1 paths=A.jpg,a.JPG") {
+		t.Fatalf("case-conflict warning = %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "B.txt") || strings.Contains(logs.String(), "b.TXT") {
+		t.Fatalf("unselected conflict was reported: %s", logs.String())
+	}
+}
+
 func TestRunReportOnlyReportsCaseConflictsAfterComparison(t *testing.T) {
+	if !filesystemSupportsCaseOnlyNames(t) {
+		t.Skip("filesystem does not preserve distinct case-only names")
+	}
 	source := t.TempDir()
 	destination := t.TempDir()
 	writeFile(t, filepath.Join(source, "A.txt"), "first", 0o600)
@@ -397,6 +582,9 @@ func TestRunKeepsDestinationOperationsConfinedWhenParentChanges(t *testing.T) {
 }
 
 func TestRunSkipsCaseConflictGroupsDuringCopy(t *testing.T) {
+	if !filesystemSupportsCaseOnlyNames(t) {
+		t.Skip("filesystem does not preserve distinct case-only names")
+	}
 	source := t.TempDir()
 	destination := t.TempDir()
 	writeFile(t, filepath.Join(source, "Dir", "File.txt"), "first", 0o600)
@@ -518,7 +706,7 @@ func TestRunStopsCopyAfterNoSpace(t *testing.T) {
 
 	original := copyStream
 	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
-		if sourceFile, ok := source.(*os.File); ok && sourceFile.Name() == failedSource {
+		if sourceFile, ok := source.(*os.File); ok && sourceFile.Name() == resolvedTestPath(failedSource) {
 			return 0, fmt.Errorf("injected no space: %w", syscall.ENOSPC)
 		}
 		return io.Copy(destination, source)
@@ -556,9 +744,35 @@ func TestRunStopsCopyAfterNoSpace(t *testing.T) {
 
 func failedPathFor(failure, sourcePath, destinationPath string) string {
 	if failure == "write" {
-		return sourcePath
+		return resolvedTestPath(sourcePath)
 	}
 	return filepath.Base(destinationPath)
+}
+
+func resolvedTestPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
+}
+
+func filesystemSupportsCaseOnlyNames(t *testing.T) bool {
+	t.Helper()
+	root := t.TempDir()
+	lower := filepath.Join(root, "case.txt")
+	upper := filepath.Join(root, "CASE.txt")
+	writeFile(t, lower, "lower", 0o600)
+	writeFile(t, upper, "upper", 0o600)
+	lowerInfo, err := os.Stat(lower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upperInfo, err := os.Stat(upper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return !os.SameFile(lowerInfo, upperInfo)
 }
 
 func TestRunEmitsCopyOutcomeProgressForEveryCopyCandidate(t *testing.T) {

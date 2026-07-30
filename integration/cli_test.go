@@ -127,13 +127,66 @@ func TestCheckCopyCopyCreatesMissingTarget(t *testing.T) {
 	assertReadableOutput(t, output, "INFO, copied ")
 }
 
+func TestCheckCopyCopyFiltersRepeatedTypes(t *testing.T) {
+	binary := buildBinary(t, "./cmd/check-copy")
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "destination")
+	mkdirAll(t, source)
+	mkdirAll(t, destination)
+	writeFile(t, filepath.Join(source, "nested", "photo.JPG"), "photo")
+	writeFile(t, filepath.Join(source, "nested", "clip.mp4"), "video")
+	writeFile(t, filepath.Join(source, "nested", "notes.txt"), "notes")
+
+	output, err := runCommand(binary, []string{
+		"-s", source,
+		"-d", destination,
+		"-t", "jpg",
+		"--type", ".MP4",
+		"-c",
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("command failed: %v\n%s", err, output)
+	}
+	for _, path := range []string{"photo.JPG", "clip.mp4"} {
+		contents, err := os.ReadFile(filepath.Join(destination, "nested", path))
+		if err != nil {
+			t.Fatalf("read selected file %q: %v", path, err)
+		}
+		if len(contents) == 0 {
+			t.Fatalf("selected file %q is empty", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(destination, "nested", "notes.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unselected file was copied: %v", err)
+	}
+}
+
 func TestCheckCopyHelpPrintsUsage(t *testing.T) {
 	output, err := runCommand(buildBinary(t, "./cmd/check-copy"), []string{"--help"}, "", nil)
 	if err != nil {
 		t.Fatalf("help failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "Usage: check-copy") {
+	help := string(output)
+	if !strings.Contains(help, "Usage: check-copy") {
 		t.Fatalf("missing usage: %s", output)
+	}
+	if !strings.Contains(help, "--type, -t") || !strings.Contains(help, "repeatable") {
+		t.Fatalf("missing repeatable type option: %s", output)
+	}
+	if !strings.Contains(help, "\tcheck-copy -s /Volumes/red/1 -d /Volumes/black/1\n") {
+		t.Fatalf("missing default report-only example: %s", output)
+	}
+}
+
+func TestCheckCopyInvalidTypeFailsWithStructuredValidationError(t *testing.T) {
+	output, err := runCommand(buildBinary(t, "./cmd/check-copy"), []string{"-t", "tar.gz"}, "", nil)
+	if err == nil {
+		t.Fatalf("invalid type succeeded: %s", output)
+	}
+	assertReadableOutput(t, output, "ERROR, validation_failed ")
+	if !strings.Contains(string(output), "invalid --type value") {
+		t.Fatalf("missing invalid type message: %s", output)
 	}
 }
 
