@@ -10,18 +10,20 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/weizhoublue/handle-files/internal/logx"
 )
 
+const copyMaxAttempts = 5
+
 var (
 	scanEntryInfo = func(dirEntry fs.DirEntry) (fs.FileInfo, error) {
 		return dirEntry.Info()
 	}
-	copyStream          = io.Copy
-	openDestinationFile = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
+	copyStream           = io.Copy
+	sleepBeforeCopyRetry = time.Sleep
+	openDestinationFile  = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
 		return root.OpenFile(name, flag, perm)
 	}
 	changeMode = func(root *os.Root, name string, mode fs.FileMode) error {
@@ -31,6 +33,91 @@ var (
 		return root.Chtimes(name, accessTime, modificationTime)
 	}
 )
+
+type copyOperationError struct {
+	operation string
+	err       error
+}
+
+func (e *copyOperationError) Error() string {
+	return fmt.Sprintf("%s: %v", e.operation, e.err)
+}
+
+func (e *copyOperationError) Unwrap() error {
+	return e.err
+}
+
+type copySourceReader struct {
+	file   *os.File
+	reader io.Reader
+}
+
+func newCopySourceReader(reader io.Reader) *copySourceReader {
+	source := &copySourceReader{reader: reader}
+	if file, ok := reader.(*os.File); ok {
+		source.file = file
+	}
+	return source
+}
+
+func (r *copySourceReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, &copyOperationError{operation: "read source", err: err}
+	}
+	return n, err
+}
+
+func (r *copySourceReader) Name() string {
+	if named, ok := r.reader.(interface{ Name() string }); ok {
+		return named.Name()
+	}
+	return ""
+}
+
+type copyDestinationWriter struct {
+	file   *os.File
+	writer io.Writer
+}
+
+func newCopyDestinationWriter(writer io.Writer) *copyDestinationWriter {
+	destination := &copyDestinationWriter{writer: writer}
+	if file, ok := writer.(*os.File); ok {
+		destination.file = file
+	}
+	return destination
+}
+
+func (w *copyDestinationWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if err != nil {
+		return n, &copyOperationError{operation: "write destination", err: err}
+	}
+	return n, nil
+}
+
+func (w *copyDestinationWriter) ReadFrom(source io.Reader) (int64, error) {
+	if w.file == nil {
+		return io.Copy(copyDestinationWithoutReadFrom{copyDestinationWriter: w}, source)
+	}
+	copySource, ok := source.(*copySourceReader)
+	if !ok || copySource.file == nil {
+		return io.Copy(copyDestinationWithoutReadFrom{copyDestinationWriter: w}, source)
+	}
+	n, err := w.file.ReadFrom(copySource.file)
+	return n, normalizeCopyStreamError(err)
+}
+
+type noCopyDestinationReadFrom struct{}
+
+func (noCopyDestinationReadFrom) ReadFrom(io.Reader) (int64, error) {
+	panic("can't happen")
+}
+
+type copyDestinationWithoutReadFrom struct {
+	noCopyDestinationReadFrom
+	*copyDestinationWriter
+}
 
 type Entry struct {
 	Size    int64
@@ -200,7 +287,7 @@ func Run(opts Options, logger logx.Logger) error {
 	succeeded := 0
 	failed := 0
 	for completed, path := range candidates {
-		if err := copyFile(opts.Source, destinationRoot, path, source[path]); err != nil {
+		if err := copyWithRetries(opts.Source, destinationRoot, path, source[path], logger); err != nil {
 			failed++
 			logger.WarnProgress("copy_failed",
 				[]logx.Field{
@@ -209,20 +296,6 @@ func Run(opts Options, logger logx.Logger) error {
 				},
 				copyProgressFields(completed+1, len(candidates), succeeded, failed),
 			)
-			if errors.Is(err, syscall.ENOSPC) {
-				remaining := candidates[completed:]
-				logger.Warn("copy_aborted_no_space",
-					logx.Field{Key: "error", Value: err.Error()},
-					logx.Field{Key: "failed_path", Value: path},
-					logx.Field{Key: "remaining", Value: strconv.Itoa(len(remaining))},
-				)
-				for _, remainingPath := range remaining {
-					logger.Warn("copy_not_completed",
-						logx.Field{Key: "path", Value: remainingPath},
-					)
-				}
-				break
-			}
 		} else {
 			succeeded++
 			logger.InfoProgress(
@@ -237,6 +310,9 @@ func Run(opts Options, logger logx.Logger) error {
 	logScanSummary(logger, source, destination)
 	logDifferenceSummary(logger, source, comparison, succeeded, failed, true)
 	logCaseConflicts(logger, comparison.CaseConflicts, "case_conflicts_skipped")
+	if failed > 0 {
+		return fmt.Errorf("%d files failed to copy", failed)
+	}
 	return nil
 }
 
@@ -292,6 +368,26 @@ func caseConflicts(source map[string]Entry) [][]string {
 	return conflicts
 }
 
+func copyWithRetries(sourceRoot string, destinationRoot *os.Root, relativePath string, entry Entry, logger logx.Logger) error {
+	for attempt := 1; attempt <= copyMaxAttempts; attempt++ {
+		err := copyFile(sourceRoot, destinationRoot, relativePath, entry)
+		if err == nil {
+			return nil
+		}
+		if attempt == copyMaxAttempts {
+			return err
+		}
+		logger.Warn("copy_retrying",
+			logx.Field{Key: "attempt", Value: strconv.Itoa(attempt)},
+			logx.Field{Key: "error", Value: err.Error()},
+			logx.Field{Key: "path", Value: relativePath},
+			logx.Field{Key: "total_attempts", Value: strconv.Itoa(copyMaxAttempts)},
+		)
+		sleepBeforeCopyRetry(time.Second)
+	}
+	return nil
+}
+
 func copyFile(sourceRoot string, destinationRoot *os.Root, relativePath string, entry Entry) error {
 	sourcePath := filepath.Join(sourceRoot, filepath.FromSlash(relativePath))
 	if err := verifyRegularFile(sourcePath); err != nil {
@@ -314,18 +410,18 @@ func copyFile(sourceRoot string, destinationRoot *os.Root, relativePath string, 
 	if err != nil {
 		return fmt.Errorf("open destination: %w", err)
 	}
-	if _, err := copyStream(destinationFile, sourceFile); err != nil {
+	if _, err := copyStream(newCopyDestinationWriter(destinationFile), newCopySourceReader(sourceFile)); err != nil {
 		destinationFile.Close()
-		return copyFailure(destinationRoot, destinationName, "write destination", err)
+		return copyFailure(destinationRoot, destinationName, normalizeCopyStreamError(err))
 	}
 	if err := destinationFile.Close(); err != nil {
-		return copyFailure(destinationRoot, destinationName, "close destination", err)
+		return copyFailure(destinationRoot, destinationName, fmt.Errorf("close destination: %w", err))
 	}
 	if err := changeMode(destinationRoot, destinationName, entry.Mode.Perm()); err != nil {
-		return copyFailure(destinationRoot, destinationName, "set destination mode", err)
+		return copyFailure(destinationRoot, destinationName, fmt.Errorf("set destination mode: %w", err))
 	}
 	if err := changeTimes(destinationRoot, destinationName, entry.ModTime, entry.ModTime); err != nil {
-		return copyFailure(destinationRoot, destinationName, "set destination modification time", err)
+		return copyFailure(destinationRoot, destinationName, fmt.Errorf("set destination modification time: %w", err))
 	}
 	return nil
 }
@@ -341,11 +437,11 @@ func verifyRegularFile(path string) error {
 	return nil
 }
 
-func copyFailure(destinationRoot *os.Root, relativePath, operation string, operationErr error) error {
+func copyFailure(destinationRoot *os.Root, relativePath string, operationErr error) error {
 	if cleanupErr := cleanupPartial(destinationRoot, relativePath); cleanupErr != nil {
-		return fmt.Errorf("%s: %w (cleanup partial destination: %v)", operation, operationErr, cleanupErr)
+		return fmt.Errorf("%w (cleanup partial destination: %v)", operationErr, cleanupErr)
 	}
-	return fmt.Errorf("%s: %w", operation, operationErr)
+	return operationErr
 }
 
 func cleanupPartial(destinationRoot *os.Root, relativePath string) error {
@@ -353,6 +449,29 @@ func cleanupPartial(destinationRoot *os.Root, relativePath string) error {
 		return err
 	}
 	return nil
+}
+
+func normalizeCopyStreamError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var operationErr *copyOperationError
+	if errors.As(err, &operationErr) {
+		return err
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		switch pathErr.Op {
+		case "read":
+			return &copyOperationError{operation: "read source", err: err}
+		case "write":
+			return &copyOperationError{operation: "write destination", err: err}
+		}
+	}
+	if errors.Is(err, io.ErrShortWrite) {
+		return &copyOperationError{operation: "write destination", err: err}
+	}
+	return err
 }
 
 func logComparison(logger logx.Logger, comparison Comparison) {

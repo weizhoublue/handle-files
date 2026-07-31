@@ -174,6 +174,12 @@ func TestCheckCopyHelpPrintsUsage(t *testing.T) {
 	if !strings.Contains(help, "--type, -t") || !strings.Contains(help, "repeatable") {
 		t.Fatalf("missing repeatable type option: %s", output)
 	}
+	if !strings.Contains(help, "each failed copy gets at most 5 total attempts, including the first, with a 1-second interval") {
+		t.Fatalf("missing retry behavior: %s", output)
+	}
+	if !strings.Contains(help, "returns a nonzero exit status if any file still fails") {
+		t.Fatalf("missing failure status behavior: %s", output)
+	}
 	if !strings.Contains(help, "\tcheck-copy -s /Volumes/red/1 -d /Volumes/black/1\n") {
 		t.Fatalf("missing default report-only example: %s", output)
 	}

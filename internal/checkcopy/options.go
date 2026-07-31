@@ -151,7 +151,7 @@ Options:
   --source, -s       source directory
   --destination, -d  destination directory
   --type, -t         file extension to include, repeatable; default: all types
-  --copy, -c         copy missing and smaller destination files
+  --copy, -c         copy missing and smaller destination files; each failed copy gets at most 5 total attempts, including the first, with a 1-second interval; returns a nonzero exit status if any file still fails
   --help, -h         show help
 
 例子
