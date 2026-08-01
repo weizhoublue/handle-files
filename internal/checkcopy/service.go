@@ -1,29 +1,65 @@
 package checkcopy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/weizhoublue/handle-files/internal/logx"
 )
 
 const copyMaxAttempts = 5
+const copyBufferSize = 32 * 1024
+
+type retryTimer interface {
+	Channel() <-chan time.Time
+	Stop() bool
+}
+
+type standardRetryTimer struct {
+	*time.Timer
+}
+
+func (t *standardRetryTimer) Channel() <-chan time.Time {
+	return t.C
+}
 
 var (
 	scanEntryInfo = func(dirEntry fs.DirEntry) (fs.FileInfo, error) {
 		return dirEntry.Info()
 	}
-	copyStream           = io.Copy
-	sleepBeforeCopyRetry = time.Sleep
-	openDestinationFile  = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
+	copyStream          = copyWithContext
+	newRetryTimer       = func(delay time.Duration) retryTimer { return &standardRetryTimer{Timer: time.NewTimer(delay)} }
+	waitBeforeCopyRetry = func(ctx context.Context) error {
+		timer := newRetryTimer(time.Second)
+		defer func() {
+			if !timer.Stop() {
+				select {
+				case <-timer.Channel():
+				default:
+				}
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.Channel():
+			return nil
+		}
+	}
+	openDestinationFile = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
 		return root.OpenFile(name, flag, perm)
 	}
 	changeMode = func(root *os.Root, name string, mode fs.FileMode) error {
@@ -32,6 +68,8 @@ var (
 	changeTimes = func(root *os.Root, name string, accessTime, modificationTime time.Time) error {
 		return root.Chtimes(name, accessTime, modificationTime)
 	}
+	notifyInterrupt = signal.Notify
+	stopInterrupt   = signal.Stop
 )
 
 type copyOperationError struct {
@@ -48,16 +86,11 @@ func (e *copyOperationError) Unwrap() error {
 }
 
 type copySourceReader struct {
-	file   *os.File
 	reader io.Reader
 }
 
 func newCopySourceReader(reader io.Reader) *copySourceReader {
-	source := &copySourceReader{reader: reader}
-	if file, ok := reader.(*os.File); ok {
-		source.file = file
-	}
-	return source
+	return &copySourceReader{reader: reader}
 }
 
 func (r *copySourceReader) Read(p []byte) (int, error) {
@@ -76,16 +109,11 @@ func (r *copySourceReader) Name() string {
 }
 
 type copyDestinationWriter struct {
-	file   *os.File
 	writer io.Writer
 }
 
 func newCopyDestinationWriter(writer io.Writer) *copyDestinationWriter {
-	destination := &copyDestinationWriter{writer: writer}
-	if file, ok := writer.(*os.File); ok {
-		destination.file = file
-	}
-	return destination
+	return &copyDestinationWriter{writer: writer}
 }
 
 func (w *copyDestinationWriter) Write(p []byte) (int, error) {
@@ -96,27 +124,28 @@ func (w *copyDestinationWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (w *copyDestinationWriter) ReadFrom(source io.Reader) (int64, error) {
-	if w.file == nil {
-		return io.Copy(copyDestinationWithoutReadFrom{copyDestinationWriter: w}, source)
-	}
-	copySource, ok := source.(*copySourceReader)
-	if !ok || copySource.file == nil {
-		return io.Copy(copyDestinationWithoutReadFrom{copyDestinationWriter: w}, source)
-	}
-	n, err := w.file.ReadFrom(copySource.file)
-	return n, normalizeCopyStreamError(err)
+type InterruptedError struct {
+	Signal os.Signal
+	Err    error
 }
 
-type noCopyDestinationReadFrom struct{}
-
-func (noCopyDestinationReadFrom) ReadFrom(io.Reader) (int64, error) {
-	panic("can't happen")
+func (e *InterruptedError) Error() string {
+	return fmt.Sprintf("interrupted by %s: %v", e.Signal, e.Err)
 }
 
-type copyDestinationWithoutReadFrom struct {
-	noCopyDestinationReadFrom
-	*copyDestinationWriter
+func (e *InterruptedError) Unwrap() error {
+	return e.Err
+}
+
+func (e *InterruptedError) ExitCode() int {
+	switch e.Signal {
+	case os.Interrupt:
+		return 130
+	case syscall.SIGTERM:
+		return 143
+	default:
+		return 1
+	}
 }
 
 type Entry struct {
@@ -159,13 +188,19 @@ func (filter extensionFilter) matches(name string) bool {
 }
 
 func Scan(root string, logger logx.Logger) (map[string]Entry, error) {
-	return scan(root, nil, logger)
+	return scan(context.Background(), root, nil, logger)
 }
 
-func scan(root string, filter extensionFilter, logger logx.Logger) (map[string]Entry, error) {
+func scan(ctx context.Context, root string, filter extensionFilter, logger logx.Logger) (map[string]Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	logger = usableLogger(logger)
 	entries := make(map[string]Entry)
 	err := filepath.WalkDir(root, func(path string, dirEntry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			if path != root {
 				logger.Warn("scan_failed",
@@ -202,6 +237,9 @@ func scan(root string, filter extensionFilter, logger logx.Logger) (map[string]E
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, ctx.Err()) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("scan directory %q: %w", root, err)
 	}
 	return entries, nil
@@ -235,7 +273,53 @@ func Compare(source, destination map[string]Entry) Comparison {
 	return comparison
 }
 
-func Run(opts Options, logger logx.Logger) error {
+func Run(ctx context.Context, opts Options, logger logx.Logger) error {
+	runCtx, finish := interruptContext(ctx)
+	err := run(runCtx, opts, logger)
+	if interrupted := finish(err); interrupted != nil {
+		return interrupted
+	}
+	return err
+}
+
+func interruptContext(parent context.Context) (context.Context, func(error) error) {
+	ctx, cancel := context.WithCancel(parent)
+	signals := make(chan os.Signal, 1)
+	notifyInterrupt(signals, os.Interrupt, syscall.SIGTERM)
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	var interrupted os.Signal
+
+	go func() {
+		defer close(finished)
+
+		select {
+		case received := <-signals:
+			interrupted = received
+			stopInterrupt(signals)
+			cancel()
+		case <-parent.Done():
+		case <-done:
+		}
+	}()
+
+	return ctx, func(runErr error) error {
+		once.Do(func() {
+			stopInterrupt(signals)
+			close(done)
+			<-finished
+			cancel()
+		})
+		if interrupted == nil {
+			return nil
+		}
+		return &InterruptedError{Signal: interrupted, Err: runErr}
+	}
+}
+
+func run(ctx context.Context, opts Options, logger logx.Logger) error {
 	logger = usableLogger(logger)
 	normalizedOptions, err := normalizeOptions(opts)
 	if err != nil {
@@ -244,11 +328,11 @@ func Run(opts Options, logger logx.Logger) error {
 	opts = normalizedOptions
 
 	filter := newExtensionFilter(opts.Types)
-	source, err := scan(opts.Source, filter, logger)
+	source, err := scan(ctx, opts.Source, filter, logger)
 	if err != nil {
 		return err
 	}
-	destination, err := scan(opts.Destination, filter, logger)
+	destination, err := scan(ctx, opts.Destination, filter, logger)
 	if err != nil {
 		return err
 	}
@@ -287,7 +371,13 @@ func Run(opts Options, logger logx.Logger) error {
 	succeeded := 0
 	failed := 0
 	for completed, path := range candidates {
-		if err := copyWithRetries(opts.Source, destinationRoot, path, source[path], logger); err != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := copyWithRetries(ctx, opts.Source, destinationRoot, path, source[path], logger); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+				return err
+			}
 			failed++
 			logger.WarnProgress("copy_failed",
 				[]logx.Field{
@@ -368,11 +458,17 @@ func caseConflicts(source map[string]Entry) [][]string {
 	return conflicts
 }
 
-func copyWithRetries(sourceRoot string, destinationRoot *os.Root, relativePath string, entry Entry, logger logx.Logger) error {
+func copyWithRetries(ctx context.Context, sourceRoot string, destinationRoot *os.Root, relativePath string, entry Entry, logger logx.Logger) error {
 	for attempt := 1; attempt <= copyMaxAttempts; attempt++ {
-		err := copyFile(sourceRoot, destinationRoot, relativePath, entry)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := copyFile(ctx, sourceRoot, destinationRoot, relativePath, entry)
 		if err == nil {
 			return nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return err
 		}
 		if attempt == copyMaxAttempts {
 			return err
@@ -383,12 +479,17 @@ func copyWithRetries(sourceRoot string, destinationRoot *os.Root, relativePath s
 			logx.Field{Key: "path", Value: relativePath},
 			logx.Field{Key: "total_attempts", Value: strconv.Itoa(copyMaxAttempts)},
 		)
-		sleepBeforeCopyRetry(time.Second)
+		if err := waitBeforeCopyRetry(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func copyFile(sourceRoot string, destinationRoot *os.Root, relativePath string, entry Entry) error {
+func copyFile(ctx context.Context, sourceRoot string, destinationRoot *os.Root, relativePath string, entry Entry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	sourcePath := filepath.Join(sourceRoot, filepath.FromSlash(relativePath))
 	if err := verifyRegularFile(sourcePath); err != nil {
 		return fmt.Errorf("verify source: %w", err)
@@ -410,7 +511,7 @@ func copyFile(sourceRoot string, destinationRoot *os.Root, relativePath string, 
 	if err != nil {
 		return fmt.Errorf("open destination: %w", err)
 	}
-	if _, err := copyStream(newCopyDestinationWriter(destinationFile), newCopySourceReader(sourceFile)); err != nil {
+	if _, err := copyStream(ctx, newCopyDestinationWriter(destinationFile), newCopySourceReader(sourceFile)); err != nil {
 		destinationFile.Close()
 		return copyFailure(destinationRoot, destinationName, normalizeCopyStreamError(err))
 	}
@@ -424,6 +525,33 @@ func copyFile(sourceRoot string, destinationRoot *os.Root, relativePath string, 
 		return copyFailure(destinationRoot, destinationName, fmt.Errorf("set destination modification time: %w", err))
 	}
 	return nil
+}
+
+func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+	buffer := make([]byte, copyBufferSize)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		read, readErr := src.Read(buffer)
+		if read > 0 {
+			written, writeErr := dst.Write(buffer[:read])
+			total += int64(written)
+			if writeErr != nil {
+				return total, writeErr
+			}
+			if written != read {
+				return total, io.ErrShortWrite
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return total, nil
+			}
+			return total, readErr
+		}
+	}
 }
 
 func verifyRegularFile(path string) error {

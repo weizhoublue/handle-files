@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const DefaultFFOptions = "-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k"
+const DefaultFFOptions = "-c:v libx264 -crf 24 -preset slow -c:a aac -b:a 192k"
 
 type Options struct {
 	Source      string
@@ -119,7 +119,7 @@ Options:
   --dest, -d        destination directory
   --remove, -r      remove source after successful compression, 默认值 true
   --execute, -x     compress files
-  --ff-option, -f   ffmpeg options, 默认值 "-c:v libx264 -crf 26 -preset slow -c:a aac -b:a 192k"
+  --ff-option, -f   ffmpeg options, 默认值 "-c:v libx264 -crf 24 -preset slow -c:a aac -b:a 192k"
   --help, -h        show help
 
 例子

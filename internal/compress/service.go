@@ -7,12 +7,20 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/weizhoublue/handle-files/internal/logx"
+)
+
+var (
+	notifyInterrupt = signal.Notify
+	stopInterrupt   = signal.Stop
 )
 
 type CommandRunner interface {
@@ -49,7 +57,77 @@ type Summary struct {
 	Failed    int
 }
 
+type InterruptedError struct {
+	Signal os.Signal
+	Err    error
+}
+
+func (e *InterruptedError) Error() string {
+	return fmt.Sprintf("interrupted by %s: %v", e.Signal, e.Err)
+}
+
+func (e *InterruptedError) Unwrap() error {
+	return e.Err
+}
+
+func (e *InterruptedError) ExitCode() int {
+	switch e.Signal {
+	case os.Interrupt:
+		return 130
+	case syscall.SIGTERM:
+		return 143
+	default:
+		return 1
+	}
+}
+
 func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Logger) (Summary, error) {
+	runCtx, finish := interruptContext(ctx)
+	summary, err := run(runCtx, opts, runner, logger)
+	if interrupted := finish(err); interrupted != nil {
+		return summary, interrupted
+	}
+	return summary, err
+}
+
+func interruptContext(parent context.Context) (context.Context, func(error) error) {
+	ctx, cancel := context.WithCancel(parent)
+	signals := make(chan os.Signal, 1)
+	notifyInterrupt(signals, os.Interrupt, syscall.SIGTERM)
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	var interrupted os.Signal
+
+	go func() {
+		defer close(finished)
+
+		select {
+		case received := <-signals:
+			interrupted = received
+			stopInterrupt(signals)
+			cancel()
+		case <-parent.Done():
+		case <-done:
+		}
+	}()
+
+	return ctx, func(runErr error) error {
+		once.Do(func() {
+			close(done)
+			stopInterrupt(signals)
+			cancel()
+			<-finished
+		})
+		if interrupted == nil {
+			return nil
+		}
+		return &InterruptedError{Signal: interrupted, Err: runErr}
+	}
+}
+
+func run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Logger) (Summary, error) {
 	logger = usableLogger(logger)
 	if runner == nil {
 		return Summary{}, errors.New("ffmpeg command runner is required")
@@ -90,6 +168,9 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 	summary := Summary{Total: len(files)}
 	if !opts.Execute {
 		for _, path := range files {
+			if err := ctx.Err(); err != nil {
+				return summary, err
+			}
 			output, err := outputPath(opts, path)
 			if err != nil {
 				return summary, fmt.Errorf("compute output path for %q: %w", path, err)
@@ -105,8 +186,12 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 	}
 
 	for _, path := range files {
-    	fmt.Println("")
-    	fmt.Println("")
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+
+		fmt.Println("")
+		fmt.Println("")
 		output, err := outputPath(opts, path)
 		if err != nil {
 			return summary, fmt.Errorf("compute output path for %q: %w", path, err)
@@ -138,7 +223,13 @@ func Run(ctx context.Context, opts Options, runner CommandRunner, logger logx.Lo
 				fields = append(fields, logx.Field{Key: "cleanup_error", Value: cleanupErr.Error()})
 			}
 			logger.ErrorProgress("compress_failed", fields, progressFields(summary))
+			if err := ctx.Err(); err != nil {
+				return summary, err
+			}
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return summary, err
 		}
 		info, err := os.Stat(output)
 		if err != nil || !info.Mode().IsRegular() {

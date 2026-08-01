@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,9 +26,17 @@ func run() int {
 		logger.Error("validation_failed", logx.Field{Key: "error", Value: err.Error()})
 		return 1
 	}
-	if err := checkcopy.Run(options, logger); err != nil {
+	if err := checkcopy.Run(context.Background(), options, logger); err != nil {
 		logger.Error("run_failed", logx.Field{Key: "error", Value: err.Error()})
-		return 1
+		return exitCode(err)
 	}
 	return 0
+}
+
+func exitCode(err error) int {
+	var interrupted *checkcopy.InterruptedError
+	if errors.As(err, &interrupted) {
+		return interrupted.ExitCode()
+	}
+	return 1
 }

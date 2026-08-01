@@ -2,6 +2,7 @@ package checkcopy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -100,6 +101,7 @@ func TestScanFiltersByFinalExtension(t *testing.T) {
 	writeFile(t, filepath.Join(root, ".gitignore"), "ignored", 0o600)
 
 	got, err := scan(
+		context.Background(),
 		root,
 		newExtensionFilter([]string{"jpg", "gz", "json", "gitignore"}),
 		testLogger(&bytes.Buffer{}),
@@ -170,6 +172,55 @@ func TestScanWarnsAndContinuesAfterEntryInformationFailure(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "WARN, scan_info_failed") {
 		t.Fatalf("Scan() logs = %q, want scan_info_failed warning", logs.String())
+	}
+}
+
+func TestRunStopsWhenInterruptedDuringScan(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	writeFile(t, filepath.Join(source, "first.txt"), "first", 0o600)
+	writeFile(t, filepath.Join(source, "nested", "second.txt"), "second", 0o600)
+
+	originalNotifyInterrupt := notifyInterrupt
+	originalStopInterrupt := stopInterrupt
+	originalScanEntryInfo := scanEntryInfo
+	t.Cleanup(func() {
+		notifyInterrupt = originalNotifyInterrupt
+		stopInterrupt = originalStopInterrupt
+		scanEntryInfo = originalScanEntryInfo
+	})
+
+	var signalCh chan<- os.Signal
+	signalHandled := make(chan struct{}, 1)
+	notifyInterrupt = func(c chan<- os.Signal, _ ...os.Signal) {
+		signalCh = c
+	}
+	stopInterrupt = func(chan<- os.Signal) {
+		select {
+		case signalHandled <- struct{}{}:
+		default:
+		}
+	}
+	scanEntryInfo = func(dirEntry fs.DirEntry) (fs.FileInfo, error) {
+		if signalCh == nil {
+			t.Fatal("notifyInterrupt did not provide a signal channel before scan callback")
+		}
+		signalCh <- os.Interrupt
+		<-signalHandled
+		scanEntryInfo = originalScanEntryInfo
+		return dirEntry.Info()
+	}
+
+	err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&bytes.Buffer{}))
+	var interrupted *InterruptedError
+	if !errors.As(err, &interrupted) || interrupted.Signal != os.Interrupt {
+		t.Fatalf("Run() error = %v, want SIGINT interruption", err)
+	}
+	if got := interrupted.ExitCode(); got != 130 {
+		t.Fatalf("ExitCode() = %d, want 130", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(destination, "first.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination file stat error = %v, want not exist", statErr)
 	}
 }
 
@@ -249,7 +300,7 @@ func TestRunReportOnlyDoesNotWriteCopyCandidates(t *testing.T) {
 	writeFile(t, filepath.Join(destination, "larger.txt"), "dst", 0o600)
 	var logs bytes.Buffer
 
-	if err := Run(Options{Source: source, Destination: destination}, testLogger(&logs)); err != nil {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination}, testLogger(&logs)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(destination, "missing", "file.txt")); !errors.Is(err, os.ErrNotExist) {
@@ -277,7 +328,7 @@ func TestRunTypeFilterScopesCopyAndSummaries(t *testing.T) {
 	writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
 	var logs bytes.Buffer
 
-	err := Run(Options{
+	err := Run(context.Background(), Options{
 		Source:      source,
 		Destination: destination,
 		Copy:        true,
@@ -311,7 +362,7 @@ func TestRunTypeFilterScopesReportOnly(t *testing.T) {
 	writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
 	var logs bytes.Buffer
 
-	if err := Run(Options{
+	if err := Run(context.Background(), Options{
 		Source:      source,
 		Destination: destination,
 		Types:       []string{"jpg"},
@@ -339,7 +390,7 @@ func TestRunTypeFilterNoMatchesSucceeds(t *testing.T) {
 	writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
 	var logs bytes.Buffer
 
-	if err := Run(Options{
+	if err := Run(context.Background(), Options{
 		Source:      source,
 		Destination: destination,
 		Types:       []string{"jpg"},
@@ -364,25 +415,26 @@ func TestRunRetriesSourceReadFailuresBeforeSuccess(t *testing.T) {
 	var logs bytes.Buffer
 
 	originalCopyStream := copyStream
-	originalSleepBeforeCopyRetry := sleepBeforeCopyRetry
+	originalWaitBeforeCopyRetry := waitBeforeCopyRetry
 	attempts := 0
 	var delays []time.Duration
-	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
+	copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
 		attempts++
 		if attempts <= 4 {
 			return 0, &copyOperationError{operation: "read source", err: syscall.EIO}
 		}
-		return io.Copy(destination, source)
+		return copyWithContext(ctx, destination, source)
 	}
-	sleepBeforeCopyRetry = func(delay time.Duration) {
-		delays = append(delays, delay)
+	waitBeforeCopyRetry = func(ctx context.Context) error {
+		delays = append(delays, time.Second)
+		return nil
 	}
 	t.Cleanup(func() {
 		copyStream = originalCopyStream
-		sleepBeforeCopyRetry = originalSleepBeforeCopyRetry
+		waitBeforeCopyRetry = originalWaitBeforeCopyRetry
 	})
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if attempts != copyMaxAttempts {
@@ -424,28 +476,29 @@ func TestRunRetriesPermanentFailuresThenContinues(t *testing.T) {
 	var logs bytes.Buffer
 
 	originalCopyStream := copyStream
-	originalSleepBeforeCopyRetry := sleepBeforeCopyRetry
+	originalWaitBeforeCopyRetry := waitBeforeCopyRetry
 	attempts := 0
 	var delays []time.Duration
 	resolvedFailedSource := resolvedTestPath(failedSource)
-	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
+	copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
 		if testReaderName(source) == resolvedFailedSource {
 			attempts++
 			if attempts <= copyMaxAttempts {
 				return 0, &copyOperationError{operation: "read source", err: syscall.EIO}
 			}
 		}
-		return io.Copy(destination, source)
+		return copyWithContext(ctx, destination, source)
 	}
-	sleepBeforeCopyRetry = func(delay time.Duration) {
-		delays = append(delays, delay)
+	waitBeforeCopyRetry = func(ctx context.Context) error {
+		delays = append(delays, time.Second)
+		return nil
 	}
 	t.Cleanup(func() {
 		copyStream = originalCopyStream
-		sleepBeforeCopyRetry = originalSleepBeforeCopyRetry
+		waitBeforeCopyRetry = originalWaitBeforeCopyRetry
 	})
 
-	err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs))
+	err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs))
 	if err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
 		t.Fatalf("Run() error = %v, want final failure count", err)
 	}
@@ -500,28 +553,29 @@ func TestRunRetriesWriteDestinationFailuresBeforeSuccess(t *testing.T) {
 	var logs bytes.Buffer
 
 	originalCopyStream := copyStream
-	originalSleepBeforeCopyRetry := sleepBeforeCopyRetry
+	originalWaitBeforeCopyRetry := waitBeforeCopyRetry
 	attempts := 0
 	var delays []time.Duration
 	resolvedFailedSource := resolvedTestPath(failedSource)
-	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
+	copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
 		if testReaderName(source) == resolvedFailedSource {
 			attempts++
 			if attempts <= copyMaxAttempts {
 				return 0, &copyOperationError{operation: "write destination", err: errors.New("disk full")}
 			}
 		}
-		return io.Copy(destination, source)
+		return copyWithContext(ctx, destination, source)
 	}
-	sleepBeforeCopyRetry = func(delay time.Duration) {
-		delays = append(delays, delay)
+	waitBeforeCopyRetry = func(ctx context.Context) error {
+		delays = append(delays, time.Second)
+		return nil
 	}
 	t.Cleanup(func() {
 		copyStream = originalCopyStream
-		sleepBeforeCopyRetry = originalSleepBeforeCopyRetry
+		waitBeforeCopyRetry = originalWaitBeforeCopyRetry
 	})
 
-	err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs))
+	err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs))
 	if err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
 		t.Fatalf("Run() error = %v, want final failure count", err)
 	}
@@ -566,36 +620,109 @@ func TestRunRetriesWriteDestinationFailuresBeforeSuccess(t *testing.T) {
 	}
 }
 
-func TestRunPreservesFileToFileCopyOptimizations(t *testing.T) {
+func TestRunStopsRetryDelayWhenInterrupted(t *testing.T) {
 	source := t.TempDir()
 	destination := t.TempDir()
 	writeFile(t, filepath.Join(source, "source.txt"), "source", 0o640)
-	var logs bytes.Buffer
 
+	originalNotifyInterrupt := notifyInterrupt
+	originalStopInterrupt := stopInterrupt
 	originalCopyStream := copyStream
-	var sourceHasWriterTo bool
-	var destinationHasReaderFrom bool
-	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
-		_, sourceHasWriterTo = source.(io.WriterTo)
-		_, destinationHasReaderFrom = destination.(io.ReaderFrom)
-		return io.Copy(destination, source)
+	originalNewRetryTimer := newRetryTimer
+	attempts := 0
+	retryDelay := time.Duration(0)
+	var signalCh chan<- os.Signal
+	waitStarted := make(chan struct{})
+	runDone := make(chan error, 1)
+	timerStub := &blockingRetryTimer{
+		waitStarted: waitStarted,
+		ch:          make(chan time.Time),
+	}
+	notifyInterrupt = func(c chan<- os.Signal, _ ...os.Signal) {
+		signalCh = c
+	}
+	stopInterrupt = func(chan<- os.Signal) {}
+	copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
+		attempts++
+		if attempts == 1 {
+			return 0, &copyOperationError{operation: "read source", err: syscall.EIO}
+		}
+		return copyWithContext(ctx, destination, source)
+	}
+	newRetryTimer = func(delay time.Duration) retryTimer {
+		retryDelay = delay
+		return timerStub
 	}
 	t.Cleanup(func() {
+		notifyInterrupt = originalNotifyInterrupt
+		stopInterrupt = originalStopInterrupt
 		copyStream = originalCopyStream
+		newRetryTimer = originalNewRetryTimer
 	})
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
-		t.Fatalf("Run() error = %v", err)
+	go func() {
+		runDone <- Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&bytes.Buffer{}))
+	}()
+	select {
+	case <-waitStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry wait did not begin using the timer channel")
 	}
-	if !sourceHasWriterTo && !destinationHasReaderFrom {
-		t.Fatalf("copyStream inputs lost file-to-file optimizations")
+	if signalCh == nil {
+		t.Fatal("notifyInterrupt did not provide a signal channel before retry wait")
 	}
-	contents, err := os.ReadFile(filepath.Join(destination, "source.txt"))
-	if err != nil {
-		t.Fatal(err)
+	signalCh <- syscall.SIGTERM
+
+	var err error
+	select {
+	case err = <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after retry wait interruption")
 	}
-	if string(contents) != "source" {
-		t.Fatalf("destination contents = %q, want %q", contents, "source")
+	var interrupted *InterruptedError
+	if !errors.As(err, &interrupted) || interrupted.Signal != syscall.SIGTERM {
+		t.Fatalf("Run() error = %v, want SIGTERM interruption", err)
+	}
+	if got := interrupted.ExitCode(); got != 143 {
+		t.Fatalf("ExitCode() = %d, want 143", got)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if retryDelay != time.Second {
+		t.Fatalf("retry delay = %s, want %s", retryDelay, time.Second)
+	}
+	if timerStub.channelCalls != 1 {
+		t.Fatalf("timer channel calls = %d, want 1", timerStub.channelCalls)
+	}
+	if timerStub.stopCalls != 1 {
+		t.Fatalf("timer stop calls = %d, want 1", timerStub.stopCalls)
+	}
+	if _, statErr := os.Stat(filepath.Join(destination, "source.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("destination file stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestCopyWithContextStopsAtChunkBoundary(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &cancelAfterFirstChunkReader{
+		cancel: cancel,
+		chunk:  []byte("first chunk"),
+	}
+	var destination bytes.Buffer
+
+	written, err := copyWithContext(ctx, &destination, reader)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("copyWithContext() error = %v, want context.Canceled", err)
+	}
+	if written != int64(len("first chunk")) {
+		t.Fatalf("copyWithContext() wrote %d bytes, want %d", written, len("first chunk"))
+	}
+	if reader.reads != 1 {
+		t.Fatalf("source reads = %d, want 1", reader.reads)
+	}
+	if got := destination.String(); got != "first chunk" {
+		t.Fatalf("destination contents = %q, want %q", got, "first chunk")
 	}
 }
 
@@ -611,7 +738,7 @@ func TestRunTypeFilterExcludesUnselectedCaseConflicts(t *testing.T) {
 	writeFile(t, filepath.Join(source, "b.TXT"), "fourth", 0o600)
 	var logs bytes.Buffer
 
-	if err := Run(Options{
+	if err := Run(context.Background(), Options{
 		Source:      source,
 		Destination: destination,
 		Types:       []string{"jpg"},
@@ -636,7 +763,7 @@ func TestRunReportOnlyReportsCaseConflictsAfterComparison(t *testing.T) {
 	writeFile(t, filepath.Join(source, "a.txt"), "second", 0o600)
 	var logs bytes.Buffer
 
-	if err := Run(Options{Source: source, Destination: destination}, testLogger(&logs)); err != nil {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination}, testLogger(&logs)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(destination, "A.txt")); !errors.Is(err, os.ErrNotExist) {
@@ -668,7 +795,7 @@ func TestRunEmitsScanAndDifferenceSummaries(t *testing.T) {
 			writeFile(t, filepath.Join(destination, "extra.txt"), "extra", 0o600)
 			var logs bytes.Buffer
 
-			if err := Run(Options{Source: source, Destination: destination, Copy: copyMode}, testLogger(&logs)); err != nil {
+			if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: copyMode}, testLogger(&logs)); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(logs.String(), "INFO, scan_summary destination_files=4 source_files=4") {
@@ -692,7 +819,7 @@ func TestRunValidatesNormalizedDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := Run(Options{Source: source, Destination: alias}, testLogger(&bytes.Buffer{}))
+	err := Run(context.Background(), Options{Source: source, Destination: alias}, testLogger(&bytes.Buffer{}))
 	if err == nil || !strings.Contains(err.Error(), "must be different") {
 		t.Fatalf("Run() error = %v, want normalized-directory validation error", err)
 	}
@@ -714,7 +841,7 @@ func TestRunCopiesCandidatesWithParentsAndMetadata(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(destination, "larger.txt"), "dst", 0o666)
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&bytes.Buffer{})); err != nil {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&bytes.Buffer{})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -759,21 +886,21 @@ func TestRunDoesNotWriteOrCleanThroughDestinationSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := copyStream
-	originalSleepBeforeCopyRetry := sleepBeforeCopyRetry
-	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
+	originalWaitBeforeCopyRetry := waitBeforeCopyRetry
+	copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
 		if testReaderName(source) == blockedSource {
 			return 0, errors.New("injected write failure")
 		}
-		return io.Copy(destination, source)
+		return copyWithContext(ctx, destination, source)
 	}
-	sleepBeforeCopyRetry = func(time.Duration) {}
+	waitBeforeCopyRetry = func(ctx context.Context) error { return nil }
 	t.Cleanup(func() {
 		copyStream = original
-		sleepBeforeCopyRetry = originalSleepBeforeCopyRetry
+		waitBeforeCopyRetry = originalWaitBeforeCopyRetry
 	})
 	var logs bytes.Buffer
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
 		t.Fatalf("Run() error = %v, want final failure count", err)
 	}
 	if contents, err := os.ReadFile(filepath.Join(outside, "blocked.txt")); err != nil || string(contents) != "outside" {
@@ -799,7 +926,7 @@ func TestRunKeepsDestinationOperationsConfinedWhenParentChanges(t *testing.T) {
 	var logs bytes.Buffer
 
 	original := openDestinationFile
-	originalSleepBeforeCopyRetry := sleepBeforeCopyRetry
+	originalWaitBeforeCopyRetry := waitBeforeCopyRetry
 	openDestinationFile = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
 		if name == filepath.Join("swapped", "file.txt") {
 			if err := os.Rename(filepath.Join(destination, "swapped"), filepath.Join(destination, "moved")); err != nil {
@@ -811,13 +938,13 @@ func TestRunKeepsDestinationOperationsConfinedWhenParentChanges(t *testing.T) {
 		}
 		return root.OpenFile(name, flag, perm)
 	}
-	sleepBeforeCopyRetry = func(time.Duration) {}
+	waitBeforeCopyRetry = func(ctx context.Context) error { return nil }
 	t.Cleanup(func() {
 		openDestinationFile = original
-		sleepBeforeCopyRetry = originalSleepBeforeCopyRetry
+		waitBeforeCopyRetry = originalWaitBeforeCopyRetry
 	})
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
 		t.Fatalf("Run() error = %v, want final failure count", err)
 	}
 	if contents, err := os.ReadFile(filepath.Join(outside, "file.txt")); err != nil || string(contents) != "outside" {
@@ -844,7 +971,7 @@ func TestRunSkipsCaseConflictGroupsDuringCopy(t *testing.T) {
 	writeFile(t, filepath.Join(destination, "dir", "file.txt"), "destination", 0o600)
 	var logs bytes.Buffer
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
 		t.Fatal(err)
 	}
 	if contents, err := os.ReadFile(filepath.Join(destination, "dir", "file.txt")); err != nil || string(contents) != "destination" {
@@ -876,11 +1003,11 @@ func TestRunCleansPartialDestinationAfterInjectedFailures(t *testing.T) {
 			name: "write",
 			inject: func(t *testing.T, failedPath string) {
 				original := copyStream
-				copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
+				copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
 					if testReaderName(source) == failedPath {
 						return 0, errors.New("injected write failure")
 					}
-					return io.Copy(destination, source)
+					return copyWithContext(ctx, destination, source)
 				}
 				t.Cleanup(func() {
 					copyStream = original
@@ -927,15 +1054,15 @@ func TestRunCleansPartialDestinationAfterInjectedFailures(t *testing.T) {
 			failedDestination := filepath.Join(destination, "failed.txt")
 			writeFile(t, failedSource, "failed", 0o600)
 			writeFile(t, filepath.Join(source, "continued.txt"), "continued", 0o600)
-			originalSleepBeforeCopyRetry := sleepBeforeCopyRetry
-			sleepBeforeCopyRetry = func(time.Duration) {}
+			originalWaitBeforeCopyRetry := waitBeforeCopyRetry
+			waitBeforeCopyRetry = func(ctx context.Context) error { return nil }
 			t.Cleanup(func() {
-				sleepBeforeCopyRetry = originalSleepBeforeCopyRetry
+				waitBeforeCopyRetry = originalWaitBeforeCopyRetry
 			})
 			tt.inject(t, failedPathFor(tt.name, failedSource, failedDestination))
 			var logs bytes.Buffer
 
-			if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
+			if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
 				t.Fatalf("Run() error = %v, want final failure count", err)
 			}
 			if _, err := os.Lstat(failedDestination); !errors.Is(err, os.ErrNotExist) {
@@ -958,20 +1085,20 @@ func TestRunRetriesNoSpaceFailuresThenContinues(t *testing.T) {
 	var logs bytes.Buffer
 
 	original := copyStream
-	originalSleepBeforeCopyRetry := sleepBeforeCopyRetry
-	copyStream = func(destination io.Writer, source io.Reader) (int64, error) {
+	originalWaitBeforeCopyRetry := waitBeforeCopyRetry
+	copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
 		if testReaderName(source) == resolvedTestPath(failedSource) {
 			return 0, fmt.Errorf("injected no space: %w", syscall.ENOSPC)
 		}
-		return io.Copy(destination, source)
+		return copyWithContext(ctx, destination, source)
 	}
-	sleepBeforeCopyRetry = func(time.Duration) {}
+	waitBeforeCopyRetry = func(ctx context.Context) error { return nil }
 	t.Cleanup(func() {
 		copyStream = original
-		sleepBeforeCopyRetry = originalSleepBeforeCopyRetry
+		waitBeforeCopyRetry = originalWaitBeforeCopyRetry
 	})
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err == nil || !strings.Contains(err.Error(), "1 files failed to copy") {
 		t.Fatalf("Run() error = %v, want final failure count", err)
 	}
 	if contents, err := os.ReadFile(filepath.Join(destination, "b-continued.txt")); err != nil || string(contents) != "continued" {
@@ -994,6 +1121,71 @@ func TestRunRetriesNoSpaceFailuresThenContinues(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "INFO, difference_summary consistent=0 copied=1 destination_larger=0 extra=0 failed=1 missing=2 source_larger=0") {
 		t.Fatalf("difference summary missing failed count:\n%s", logs.String())
+	}
+}
+
+func TestRunInterruptCleansPartialDestination(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	writeFile(t, filepath.Join(source, "a-complete.txt"), "complete", 0o600)
+	interruptedSourcePath := filepath.Join(source, "b-interrupted.txt")
+	writeFile(t, interruptedSourcePath, "interrupted", 0o600)
+	writeFile(t, filepath.Join(source, "z-later.txt"), "later", 0o600)
+	interruptedSource := resolvedTestPath(interruptedSourcePath)
+
+	originalNotifyInterrupt := notifyInterrupt
+	originalStopInterrupt := stopInterrupt
+	originalCopyStream := copyStream
+	originalOpenDestinationFile := openDestinationFile
+	t.Cleanup(func() {
+		notifyInterrupt = originalNotifyInterrupt
+		stopInterrupt = originalStopInterrupt
+		copyStream = originalCopyStream
+		openDestinationFile = originalOpenDestinationFile
+	})
+
+	signalReady := make(chan chan<- os.Signal, 1)
+	notifyInterrupt = func(c chan<- os.Signal, _ ...os.Signal) {
+		signalReady <- c
+	}
+	stopInterrupt = func(chan<- os.Signal) {}
+
+	var opened []string
+	openDestinationFile = func(root *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
+		opened = append(opened, name)
+		return root.OpenFile(name, flag, perm)
+	}
+
+	copyStream = func(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
+		if testReaderName(source) != interruptedSource {
+			return copyWithContext(ctx, destination, source)
+		}
+		written, err := destination.Write([]byte("partial"))
+		if err != nil {
+			return int64(written), err
+		}
+		signalCh := <-signalReady
+		signalCh <- os.Interrupt
+		<-ctx.Done()
+		return int64(written), ctx.Err()
+	}
+
+	err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&bytes.Buffer{}))
+	var interrupted *InterruptedError
+	if !errors.As(err, &interrupted) || interrupted.Signal != os.Interrupt {
+		t.Fatalf("Run() error = %v, want SIGINT interruption", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(destination, "a-complete.txt")); statErr != nil {
+		t.Fatalf("completed destination stat error = %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(destination, "b-interrupted.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial destination stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(destination, "z-later.txt")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("later destination stat error = %v, want not exist", statErr)
+	}
+	if !reflect.DeepEqual(opened, []string{"a-complete.txt", "b-interrupted.txt"}) {
+		t.Fatalf("opened destinations = %#v, want first two candidates only", opened)
 	}
 }
 
@@ -1040,7 +1232,7 @@ func TestRunEmitsCopyOutcomeProgressForEveryCopyCandidate(t *testing.T) {
 	writeFile(t, filepath.Join(destination, "destination-larger.txt"), "destination is larger", 0o600)
 	var logs bytes.Buffer
 
-	if err := Run(Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
+	if err := Run(context.Background(), Options{Source: source, Destination: destination, Copy: true}, testLogger(&logs)); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Count(logs.String(), "INFO, copied "); got != 2 {
@@ -1076,6 +1268,44 @@ func testReaderName(reader io.Reader) string {
 		return named.Name()
 	}
 	return ""
+}
+
+type cancelAfterFirstChunkReader struct {
+	cancel context.CancelFunc
+	chunk  []byte
+	reads  int
+}
+
+func (r *cancelAfterFirstChunkReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.reads > 1 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunk)
+	r.cancel()
+	return n, nil
+}
+
+type blockingRetryTimer struct {
+	waitStarted  chan struct{}
+	ch           chan time.Time
+	started      bool
+	channelCalls int
+	stopCalls    int
+}
+
+func (t *blockingRetryTimer) Channel() <-chan time.Time {
+	t.channelCalls++
+	if !t.started {
+		t.started = true
+		close(t.waitStarted)
+	}
+	return t.ch
+}
+
+func (t *blockingRetryTimer) Stop() bool {
+	t.stopCalls++
+	return true
 }
 
 func requireCopyFailureRecord(t *testing.T, logs string) {

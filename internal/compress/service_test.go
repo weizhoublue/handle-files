@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/weizhoublue/handle-files/internal/logx"
@@ -20,11 +22,13 @@ type runnerCall struct {
 }
 
 type fakeRunner struct {
-	path          string
-	lookPathErr   error
-	run           func(name string, args ...string) error
-	runWithOutput func(stdout, stderr io.Writer, name string, args ...string) error
-	calls         []runnerCall
+	path                 string
+	lookPathErr          error
+	runContext           func(context.Context, string, ...string) error
+	run                  func(name string, args ...string) error
+	runWithOutput        func(stdout, stderr io.Writer, name string, args ...string) error
+	runWithOutputContext func(context.Context, io.Writer, io.Writer, string, ...string) error
+	calls                []runnerCall
 }
 
 func (r *fakeRunner) LookPath(string) (string, error) {
@@ -34,16 +38,22 @@ func (r *fakeRunner) LookPath(string) (string, error) {
 	return r.path, nil
 }
 
-func (r *fakeRunner) Run(_ context.Context, name string, args ...string) error {
+func (r *fakeRunner) Run(ctx context.Context, name string, args ...string) error {
 	r.calls = append(r.calls, runnerCall{name: name, args: append([]string(nil), args...)})
+	if r.runContext != nil {
+		return r.runContext(ctx, name, args...)
+	}
 	if r.run != nil {
 		return r.run(name, args...)
 	}
 	return nil
 }
 
-func (r *fakeRunner) RunWithOutput(_ context.Context, stdout, stderr io.Writer, name string, args ...string) error {
+func (r *fakeRunner) RunWithOutput(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) error {
 	r.calls = append(r.calls, runnerCall{name: name, args: append([]string(nil), args...)})
+	if r.runWithOutputContext != nil {
+		return r.runWithOutputContext(ctx, stdout, stderr, name, args...)
+	}
 	if r.runWithOutput != nil {
 		return r.runWithOutput(stdout, stderr, name, args...)
 	}
@@ -51,6 +61,25 @@ func (r *fakeRunner) RunWithOutput(_ context.Context, stdout, stderr io.Writer, 
 		return r.run(name, args...)
 	}
 	return nil
+}
+
+type hookWriter struct {
+	bytes.Buffer
+	onWrite func(string)
+}
+
+func (w *hookWriter) Write(p []byte) (int, error) {
+	if w.onWrite != nil {
+		w.onWrite(string(p))
+	}
+	return w.Buffer.Write(p)
+}
+
+func (w *hookWriter) WriteString(s string) (int, error) {
+	if w.onWrite != nil {
+		w.onWrite(s)
+	}
+	return w.Buffer.WriteString(s)
 }
 
 func TestDiscoverMP4FilesSkipsOutputFiles(t *testing.T) {
@@ -352,6 +381,97 @@ func TestRunDestinationCleansFailedOutputAndRetainsSource(t *testing.T) {
 	}
 }
 
+func TestRunInterruptRemovesActivePartialOutputAndStopsFurtherCompression(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "first.mp4")
+	secondSource := filepath.Join(root, "second.mp4")
+	output := filepath.Join(root, "first_output.mp4")
+	mustWrite(t, source, "video")
+	mustWrite(t, secondSource, "video")
+
+	oldNotifyInterrupt := notifyInterrupt
+	oldStopInterrupt := stopInterrupt
+	t.Cleanup(func() {
+		notifyInterrupt = oldNotifyInterrupt
+		stopInterrupt = oldStopInterrupt
+	})
+
+	partialOutputCreated := make(chan struct{})
+	notifyInterrupt = func(c chan<- os.Signal, _ ...os.Signal) {
+		go func() {
+			<-partialOutputCreated
+			c <- os.Interrupt
+		}()
+	}
+	stopInterrupt = func(chan<- os.Signal) {}
+
+	startedInputs := make([]string, 0, 2)
+	var closePartialOutputCreated sync.Once
+	runner := &fakeRunner{
+		path: "/fake/ffmpeg",
+		runWithOutputContext: func(ctx context.Context, stdout, stderr io.Writer, _ string, args ...string) error {
+			startedInputs = append(startedInputs, args[1])
+			mustWrite(t, args[len(args)-1], "partial")
+			closePartialOutputCreated.Do(func() {
+				close(partialOutputCreated)
+			})
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+
+	summary, err := Run(
+		context.Background(),
+		Options{Source: root, Execute: true, FFArgs: []string{"-c:v", "libx264"}},
+		runner,
+		testLogger(&bytes.Buffer{}),
+	)
+
+	var interrupted *InterruptedError
+	if !errors.As(err, &interrupted) || interrupted.Signal != os.Interrupt {
+		t.Fatalf("Run() error = %v, want SIGINT interruption", err)
+	}
+	if got := interrupted.ExitCode(); got != 130 {
+		t.Fatalf("ExitCode() = %d, want 130", got)
+	}
+	if want := (Summary{Total: 2, Failed: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	if _, statErr := os.Stat(output); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial output stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(source); statErr != nil {
+		t.Fatalf("source stat error = %v", statErr)
+	}
+	if _, statErr := os.Stat(secondSource); statErr != nil {
+		t.Fatalf("second source stat error = %v", statErr)
+	}
+	if got := len(startedInputs); got != 1 {
+		t.Fatalf("started input count = %d, want 1", got)
+	}
+}
+
+func TestInterruptedErrorExitCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		signal os.Signal
+		want   int
+	}{
+		{name: "sigint", signal: os.Interrupt, want: 130},
+		{name: "sigterm", signal: syscall.SIGTERM, want: 143},
+		{name: "unsupported", signal: syscall.SIGUSR1, want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &InterruptedError{Signal: tt.signal, Err: context.Canceled}
+			if got := err.ExitCode(); got != tt.want {
+				t.Fatalf("ExitCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunReportsSizeReductionForSuccessfulCompression(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -565,6 +685,75 @@ func TestRunPreviewDoesNotInvokeCompression(t *testing.T) {
 	}
 }
 
+func TestRunPreviewInterruptStopsBeforeLaterInputs(t *testing.T) {
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "source")
+	destinationRoot := filepath.Join(root, "destination")
+	first := filepath.Join(sourceRoot, "nested", "first.mp4")
+	second := filepath.Join(sourceRoot, "nested", "second.mp4")
+	mustWrite(t, first, "video")
+	mustWrite(t, second, "video")
+
+	oldNotifyInterrupt := notifyInterrupt
+	oldStopInterrupt := stopInterrupt
+	t.Cleanup(func() {
+		notifyInterrupt = oldNotifyInterrupt
+		stopInterrupt = oldStopInterrupt
+	})
+
+	var signalCh chan<- os.Signal
+	notifyInterrupt = func(c chan<- os.Signal, _ ...os.Signal) {
+		signalCh = c
+	}
+
+	var runCtx context.Context
+	runner := &fakeRunner{
+		path: "/fake/ffmpeg",
+		runContext: func(ctx context.Context, _ string, args ...string) error {
+			if reflect.DeepEqual(args, []string{"-version"}) {
+				runCtx = ctx
+			}
+			return nil
+		},
+	}
+	logs := &hookWriter{}
+	var triggerInterrupt sync.Once
+	logs.onWrite = func(entry string) {
+		if !strings.Contains(entry, "INFO, preview ") || !strings.Contains(entry, "input="+first) {
+			return
+		}
+		triggerInterrupt.Do(func() {
+			if signalCh == nil || runCtx == nil {
+				t.Fatal("interrupt context not initialized")
+			}
+			signalCh <- os.Interrupt
+			<-runCtx.Done()
+		})
+	}
+	summary, err := Run(
+		context.Background(),
+		Options{Source: sourceRoot, Destination: destinationRoot, FFArgs: []string{"-c:v", "libx264"}},
+		runner,
+		testLoggerWithErr(logs, &bytes.Buffer{}),
+	)
+	var interrupted *InterruptedError
+	if !errors.As(err, &interrupted) || interrupted.Signal != os.Interrupt {
+		t.Fatalf("Run() error = %v, summary = %#v, logs = %q, want SIGINT interruption", err, summary, logs.String())
+	}
+	if want := (Summary{Total: 2, Succeeded: 1}); summary != want {
+		t.Fatalf("Run() summary = %#v, want %#v", summary, want)
+	}
+	if got := strings.Count(logs.String(), "INFO, preview "); got != 1 {
+		t.Fatalf("preview log count = %d, want 1:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "input="+first) || strings.Contains(logs.String(), "input="+second) {
+		t.Fatalf("preview should stop before later input:\n%s", logs.String())
+	}
+	if want := []runnerCall{{name: "/fake/ffmpeg", args: []string{"-version"}}}; !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("runner calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
 func TestRunExecutesEachLiveFileWithoutConfirmation(t *testing.T) {
 	root := t.TempDir()
 	first := filepath.Join(root, "a.mp4")
@@ -664,11 +853,11 @@ func mustWrite(t *testing.T, path, contents string) {
 	}
 }
 
-func testLogger(out *bytes.Buffer) logx.Logger {
+func testLogger(out io.Writer) logx.Logger {
 	return testLoggerWithErr(out, out)
 }
 
-func testLoggerWithErr(out, err *bytes.Buffer) logx.Logger {
+func testLoggerWithErr(out, err io.Writer) logx.Logger {
 	return logx.Logger{
 		Out: out,
 		Err: err,
