@@ -28,7 +28,15 @@ func run() int {
 	}
 	if _, err := compress.Run(context.Background(), options, compress.NewCommandRunner(), logger); err != nil {
 		logger.Error("run_failed", logx.Field{Key: "error", Value: err.Error()})
-		return 1
+		return exitCode(err)
 	}
 	return 0
+}
+
+func exitCode(err error) int {
+	var interrupted *compress.InterruptedError
+	if errors.As(err, &interrupted) {
+		return interrupted.ExitCode()
+	}
+	return 1
 }
